@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ethereum Block Explorer</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    select, button, input {
+      margin: 10px;
+      padding: 5px 10px;
+      font-size: 16px;
+    }
+    canvas {
+      display: block;
+      margin: 20px auto;
+      border: 1px solid #ddd;
+    }
+    table {
+      margin: 20px auto;
+      width: 90%;
+      border-collapse: collapse;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: center;
+    }
+    th {
+      background-color: #f4f4f4;
+    }
+    .loading {
+      text-align: center;
+      font-size: 18px;
+      color: #333;
+      margin: 20px;
+    }
+    #tooltip {
+      position: absolute;
+      background: white;
+      border: 1px solid #ddd;
+      padding: 10px;
+      display: none;
+      pointer-events: none;
+      font-size: 14px;
+      z-index: 10;
+    }
+    #blockDetails {
+      margin: 20px auto;
+      width: 90%;
+      border: 1px solid #ddd;
+      padding: 10px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Ethereum Block Explorer</h1>
+
+  <div style="text-align: center;">
+    <label for="blockSearch">Find Block by Number or Hash:</label>
+    <input type="text" id="blockSearch" placeholder="Enter block number or hash">
+    <button onclick="findBlock()">Search</button>
+  </div>
+
+  <div style="text-align: center;">
+    <label for="startBlock">Start Block:</label>
+    <input type="number" id="startBlock" placeholder="Enter start block number">
+    <label for="endBlock">End Block:</label>
+    <input type="number" id="endBlock" placeholder="Enter end block number">
+    <label for="blockInterval">Block Interval:</label>
+    <input type="number" id="blockInterval" placeholder="Enter block interval (e.g., 1, 5, 10)">
+    <button onclick="fetchBlockRange()">Fetch Range</button>
+  </div>
+
+  <div id="loading" class="loading" style="display: none;">Fetching blocks, please wait...</div>
+
+  <canvas id="chart" width="800" height="400"></canvas>
+
+  <table id="blockTable">
+    <thead>
+      <tr>
+        <th>Block Number</th>
+        <th>Difficulty</th>
+        <th>Gas Used</th>
+        <th>Transactions</th>
+        <th>Timestamp</th>
+        <th>Miner</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div id="blockDetails">
+    <h3>Block Details:</h3>
+    <p id="blockDetailsContent"></p>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <script>
+    const RPC_URL = "https://pub1.aplocoin.com";
+
+    async function fetchBlocksInBatch(startBlock, endBlock, interval) {
+      const blocks = [];
+      const batchRequest = [];
+
+      for (let blockNumber = startBlock; blockNumber >= endBlock; blockNumber -= interval) {
+        batchRequest.push({
+          jsonrpc: "2.0",
+          method: "eth_getBlockByNumber",
+          params: [`0x${blockNumber.toString(16)}`, false],
+          id: blockNumber,
+        });
+      }
+
+      const response = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(batchRequest),
+      });
+
+      const data = await response.json();
+
+      for (const block of data) {
+        if (block.result) {
+          blocks.push({
+            number: parseInt(block.result.number, 16),
+            difficulty: parseInt(block.result.difficulty, 16),
+            gasUsed: parseInt(block.result.gasUsed, 16),
+            transactions: block.result.transactions.length,
+            timestamp: new Date(parseInt(block.result.timestamp, 16) * 1000).toLocaleString(),
+            miner: block.result.miner,
+          });
+        }
+      }
+
+      return blocks;
+    }
+
+    async function fetchBlockRange() {
+      const startBlock = document.getElementById("startBlock").value;
+      const endBlock = document.getElementById("endBlock").value;
+      const blockInterval = document.getElementById("blockInterval").value;
+
+      if (!startBlock || !endBlock || !blockInterval || startBlock < 0 || endBlock < startBlock || blockInterval <= 0) {
+        alert("Please enter valid block range and interval.");
+        return;
+      }
+
+      document.getElementById("loading").style.display = "block";
+
+      const blocks = await fetchBlocksInBatch(parseInt(endBlock), parseInt(startBlock), parseInt(blockInterval));
+
+      updateTable(blocks.reverse());
+      renderChart(blocks);
+      document.getElementById("loading").style.display = "none";
+    }
+
+    async function findBlock() {
+      const searchInput = document.getElementById("blockSearch").value.trim();
+      const blockDetails = document.getElementById("blockDetails");
+      const blockDetailsContent = document.getElementById("blockDetailsContent");
+
+      if (!searchInput) {
+        blockDetails.style.display = "block";
+        blockDetailsContent.innerHTML = `<strong>Please enter a block number or hash.</strong>`;
+        return;
+      }
+
+      let method, params;
+      if (isNaN(searchInput)) {
+        method = "eth_getBlockByHash";
+        params = [searchInput, true];
+      } else {
+        method = "eth_getBlockByNumber";
+        params = [`0x${parseInt(searchInput).toString(16)}`, true];
+      }
+
+      const response = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method,
+          params,
+          id: 1,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.result) {
+        const block = data.result;
+        blockDetails.style.display = "block";
+        blockDetailsContent.innerHTML = `
+          <strong>Block Number:</strong> ${parseInt(block.number, 16)}<br>
+          <strong>Hash:</strong> ${block.hash}<br>
+          <strong>Difficulty:</strong> ${parseInt(block.difficulty, 16)}<br>
+          <strong>Gas Used:</strong> ${parseInt(block.gasUsed, 16)}<br>
+          <strong>Transactions:</strong> ${block.transactions.length}<br>
+          <strong>Timestamp:</strong> ${new Date(parseInt(block.timestamp, 16) * 1000).toLocaleString()}<br>
+          <strong>Miner:</strong> ${block.miner}
+        `;
+      } else {
+        blockDetails.style.display = "block";
+        blockDetailsContent.innerHTML = `<strong>Block not found!</strong>`;
+      }
+    }
+
+    function updateTable(blocks) {
+      const tableBody = document.querySelector("#blockTable tbody");
+      tableBody.innerHTML = "";
+
+      blocks.forEach(block => {
+        const row = `
+          <tr>
+            <td>${block.number}</td>
+            <td>${block.difficulty}</td>
+            <td>${block.gasUsed}</td>
+            <td>${block.transactions}</td>
+            <td>${block.timestamp}</td>
+            <td>${block.miner}</td>
+          </tr>
+        `;
+        tableBody.innerHTML += row;
+      });
+    }
+
+    function renderChart(blocks) {
+      const canvas = document.getElementById("chart");
+      const ctx = canvas.getContext("2d");
+      const tooltip = document.getElementById("tooltip");
+      const margin = 40;
+      const width = canvas.width - margin * 2;
+      const height = canvas.height - margin * 2;
+
+      const maxDifficulty = Math.max(...blocks.map(block => block.difficulty));
+      const pointSpacing = width / (blocks.length - 1);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.beginPath();
+      ctx.moveTo(margin, margin);
+      ctx.lineTo(margin, canvas.height - margin);
+      ctx.lineTo(canvas.width - margin, canvas.height - margin);
+      ctx.strokeStyle = "#000";
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(margin, canvas.height - margin - (blocks[0].difficulty / maxDifficulty) * height);
+      blocks.forEach((block, index) => {
+        const x = margin + index * pointSpacing;
+        const y = canvas.height - margin - (block.difficulty / maxDifficulty) * height;
+
+        ctx.lineTo(x, y);
+      });
+
+      ctx.strokeStyle = "blue"; // Blue line
+      ctx.lineWidth = 2; // Line thickness
+      ctx.stroke();
+
+      canvas.addEventListener("mousemove", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+
+        let closestBlock = null;
+        let minDistance = Infinity;
+
+        blocks.forEach((block, index) => {
+          const x = margin + index * pointSpacing;
+          const distance = Math.abs(mouseX - x);
+
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestBlock = block;
+          }
+        });
+
+        if (closestBlock) {
+          tooltip.style.display = "block";
+          tooltip.style.left = `${e.pageX + 10}px`;
+          tooltip.style.top = `${e.pageY + 10}px`;
+          tooltip.innerHTML = `
+            <strong>Block Number:</strong> ${closestBlock.number}<br>
+            <strong>Difficulty:</strong> ${closestBlock.difficulty}<br>
+            <strong>Transactions:</strong> ${closestBlock.transactions}<br>
+            <strong>Timestamp:</strong> ${closestBlock.timestamp}
+          `;
+        } else {
+          tooltip.style.display = "none";
+        }
+      });
+
+      canvas.addEventListener("mouseleave", () => {
+        tooltip.style.display = "none";
+      });
+    }
+  </script>
+</body>
+</html>
