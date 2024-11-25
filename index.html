@@ -8,181 +8,224 @@
     body {
       font-family: Arial, sans-serif;
       margin: 20px;
+      background-color: #f9f9f9;
+      color: #333;
+      transition: background-color 0.3s, color 0.3s;
+    }
+    body.dark {
+      background-color: #121212;
+      color: #f0f0f0;
     }
     h1 {
       text-align: center;
-      color: #333;
     }
     select, button, input {
       margin: 10px;
       padding: 5px 10px;
       font-size: 16px;
     }
+    .tabs {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+    .tab {
+      margin: 0 10px;
+      padding: 10px 20px;
+      cursor: pointer;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      background-color: #f0f0f0;
+    }
+    .tab.active {
+      background-color: #ddd;
+      font-weight: bold;
+    }
+    .content {
+      display: none;
+    }
+    .content.active {
+      display: block;
+    }
+    .dark .tab {
+      background-color: #333;
+      color: #f0f0f0;
+    }
+    .dark .tab.active {
+      background-color: #555;
+    }
+    .dark table, .dark input, .dark button, .dark select {
+      background-color: #222;
+      color: #f0f0f0;
+      border: 1px solid #444;
+    }
     canvas {
       display: block;
       margin: 20px auto;
       border: 1px solid #ddd;
     }
-    table {
-      margin: 20px auto;
-      width: 90%;
-      border-collapse: collapse;
-    }
-    th, td {
-      border: 1px solid #ddd;
-      padding: 8px;
-      text-align: center;
-    }
-    th {
-      background-color: #f4f4f4;
-    }
-    .loading {
-      text-align: center;
-      font-size: 18px;
-      color: #333;
-      margin: 20px;
-    }
-    #tooltip {
-      position: absolute;
-      background: white;
-      border: 1px solid #ddd;
+    #toggleDarkMode {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      cursor: pointer;
       padding: 10px;
-      display: none;
-      pointer-events: none;
-      font-size: 14px;
-      z-index: 10;
+      background-color: #ddd;
+      border: 1px solid #aaa;
+      border-radius: 5px;
     }
-    #blockDetails {
-      margin: 20px auto;
-      width: 90%;
-      border: 1px solid #ddd;
-      padding: 10px;
-      display: none;
+    body.dark #toggleDarkMode {
+      background-color: #555;
+      color: #fff;
+      border: 1px solid #333;
+    }
+    input[type="number"] {
+      width: 150px;
     }
   </style>
 </head>
 <body>
   <h1>Ethereum Block Explorer</h1>
+  <button id="toggleDarkMode">Toggle Dark Mode</button>
 
-  <div style="text-align: center;">
-    <label for="blockSearch">Find Block by Number or Hash:</label>
-    <input type="text" id="blockSearch" placeholder="Enter block number or hash">
-    <button onclick="findBlock()">Search</button>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('explorer')">Block Explorer</div>
+    <div class="tab" onclick="switchTab('charts')">Advanced Charts</div>
+    <div class="tab" onclick="switchTab('walletSearch')">Wallet Search</div>
+    <div class="tab" onclick="switchTab('stats')">Stats</div>
+    <div class="tab" onclick="switchTab('richAddresses')">Rich Addresses</div>
   </div>
 
-  <div style="text-align: center;">
-    <label for="startBlock">Start Block:</label>
-    <input type="number" id="startBlock" placeholder="Enter start block number">
-    <label for="endBlock">End Block:</label>
-    <input type="number" id="endBlock" placeholder="Enter end block number">
-    <label for="blockInterval">Block Interval:</label>
-    <input type="number" id="blockInterval" placeholder="Enter block interval (e.g., 1, 5, 10)">
-    <button onclick="fetchBlockRange()">Fetch Range</button>
+  <!-- Block Explorer -->
+  <div class="content active" id="explorer">
+    <div style="text-align: center;">
+      <label for="blockSearch">Find Block:</label>
+      <input type="text" id="blockSearch" placeholder="Block number or hash">
+      <button onclick="findBlock()">Search</button>
+    </div>
+    <table id="blockTable">
+      <thead>
+        <tr>
+          <th>Block Number</th>
+          <th>Difficulty</th>
+          <th>Gas Used</th>
+          <th>Transactions</th>
+          <th>Timestamp</th>
+          <th>Miner</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
   </div>
 
-  <div id="loading" class="loading" style="display: none;">Fetching blocks, please wait...</div>
+  <!-- Advanced Charts -->
+  <div class="content" id="charts">
+    <h3>Advanced Charts</h3>
+    <div style="text-align: center;">
+      <label for="metric">Select Metric:</label>
+      <select id="metric">
+        <option value="difficulty">Difficulty</option>
+        <option value="gasUsed">Gas Used</option>
+        <option value="transactions">Transactions</option>
+      </select>
 
-  <canvas id="chart" width="800" height="400"></canvas>
+      <br><br>
 
-  <table id="blockTable">
-    <thead>
-      <tr>
-        <th>Block Number</th>
-        <th>Difficulty</th>
-        <th>Gas Used</th>
-        <th>Transactions</th>
-        <th>Timestamp</th>
-        <th>Miner</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+      <label for="startBlock">Start Block:</label>
+      <input type="number" id="startBlock" placeholder="Start block" />
 
-  <div id="blockDetails">
-    <h3>Block Details:</h3>
-    <p id="blockDetailsContent"></p>
+      <label for="endBlock">End Block:</label>
+      <input type="number" id="endBlock" placeholder="End block" />
+
+      <label for="interval">Interval (blocks):</label>
+      <input type="number" id="interval" placeholder="Block interval" value="10" />
+
+      <button onclick="renderAdvancedChart()">Update Chart</button>
+    </div>
+    <canvas id="advancedChart" width="800" height="400"></canvas>
   </div>
 
-  <div id="tooltip"></div>
+  <!-- Wallet Search -->
+  <div class="content" id="walletSearch">
+    <div style="text-align: center;">
+      <label for="walletAddress">Wallet Address:</label>
+      <input type="text" id="walletAddress" placeholder="Enter wallet address">
+      <button onclick="searchWallet()">Search</button>
+    </div>
+    <table id="walletTable">
+      <thead>
+        <tr>
+          <th>Transaction Hash</th>
+          <th>From</th>
+          <th>To</th>
+          <th>Value</th>
+          <th>Timestamp</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
 
+  <!-- Stats -->
+  <div class="content" id="stats">
+    <h3>24-Hour Stats</h3>
+    <div style="text-align: center;">
+      <p><strong>Transactions in the last 24 hours:</strong> <span id="transactions24h">Loading...</span></p>
+      <p><strong>Circulating Supply:</strong> <span id="circulatingSupply">Loading...</span></p>
+    </div>
+  </div>
+
+  <!-- Rich Addresses -->
+  <div class="content" id="richAddresses">
+    <h3>Rich Addresses</h3>
+    <div style="text-align: center;">
+      <table id="richAddressesTable">
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th>Balance</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     const RPC_URL = "https://pub1.aplocoin.com";
+    let chartInstance = null;
 
-    async function fetchBlocksInBatch(startBlock, endBlock, interval) {
-      const blocks = [];
-      const batchRequest = [];
+    // Dark Mode Toggle
+    document.getElementById("toggleDarkMode").addEventListener("click", () => {
+      document.body.classList.toggle("dark");
+    });
 
-      for (let blockNumber = startBlock; blockNumber >= endBlock; blockNumber -= interval) {
-        batchRequest.push({
-          jsonrpc: "2.0",
-          method: "eth_getBlockByNumber",
-          params: [`0x${blockNumber.toString(16)}`, false],
-          id: blockNumber,
-        });
-      }
+    // Tab Switching
+    function switchTab(tab) {
+      document.querySelectorAll(".content").forEach(content => content.classList.remove("active"));
+      document.querySelector(`#${tab}`).classList.add("active");
 
-      const response = await fetch(RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(batchRequest),
-      });
-
-      const data = await response.json();
-
-      for (const block of data) {
-        if (block.result) {
-          blocks.push({
-            number: parseInt(block.result.number, 16),
-            difficulty: parseInt(block.result.difficulty, 16),
-            gasUsed: parseInt(block.result.gasUsed, 16),
-            transactions: block.result.transactions.length,
-            timestamp: new Date(parseInt(block.result.timestamp, 16) * 1000).toLocaleString(),
-            miner: block.result.miner,
-          });
-        }
-      }
-
-      return blocks;
+      document.querySelectorAll(".tab").forEach(tabEl => tabEl.classList.remove("active"));
+      document.querySelector(`.tab[onclick="switchTab('${tab}')"]`).classList.add("active");
     }
 
-    async function fetchBlockRange() {
-      const startBlock = document.getElementById("startBlock").value;
-      const endBlock = document.getElementById("endBlock").value;
-      const blockInterval = document.getElementById("blockInterval").value;
-
-      if (!startBlock || !endBlock || !blockInterval || startBlock < 0 || endBlock < startBlock || blockInterval <= 0) {
-        alert("Please enter valid block range and interval.");
-        return;
-      }
-
-      document.getElementById("loading").style.display = "block";
-
-      const blocks = await fetchBlocksInBatch(parseInt(endBlock), parseInt(startBlock), parseInt(blockInterval));
-
-      updateTable(blocks.reverse());
-      renderChart(blocks);
-      document.getElementById("loading").style.display = "none";
-    }
-
+    // Find Block Function
     async function findBlock() {
       const searchInput = document.getElementById("blockSearch").value.trim();
-      const blockDetails = document.getElementById("blockDetails");
-      const blockDetailsContent = document.getElementById("blockDetailsContent");
+      const tableBody = document.querySelector("#blockTable tbody");
+      tableBody.innerHTML = "";
 
       if (!searchInput) {
-        blockDetails.style.display = "block";
-        blockDetailsContent.innerHTML = `<strong>Please enter a block number or hash.</strong>`;
+        alert("Please enter a block number or hash.");
         return;
       }
 
-      let method, params;
-      if (isNaN(searchInput)) {
-        method = "eth_getBlockByHash";
-        params = [searchInput, true];
-      } else {
-        method = "eth_getBlockByNumber";
-        params = [`0x${parseInt(searchInput).toString(16)}`, true];
-      }
+      const isNumber = !isNaN(searchInput);
+      const params = isNumber
+        ? [`0x${parseInt(searchInput).toString(16)}`, true]
+        : [searchInput, true];
+      const method = isNumber ? "eth_getBlockByNumber" : "eth_getBlockByHash";
 
       const response = await fetch(RPC_URL, {
         method: "POST",
@@ -196,113 +239,187 @@
       });
 
       const data = await response.json();
-
       if (data.result) {
         const block = data.result;
-        blockDetails.style.display = "block";
-        blockDetailsContent.innerHTML = `
-          <strong>Block Number:</strong> ${parseInt(block.number, 16)}<br>
-          <strong>Hash:</strong> ${block.hash}<br>
-          <strong>Difficulty:</strong> ${parseInt(block.difficulty, 16)}<br>
-          <strong>Gas Used:</strong> ${parseInt(block.gasUsed, 16)}<br>
-          <strong>Transactions:</strong> ${block.transactions.length}<br>
-          <strong>Timestamp:</strong> ${new Date(parseInt(block.timestamp, 16) * 1000).toLocaleString()}<br>
-          <strong>Miner:</strong> ${block.miner}
+        const row = `
+          <tr>
+            <td>${parseInt(block.number, 16)}</td>
+            <td>${parseInt(block.difficulty, 16)}</td>
+            <td>${parseInt(block.gasUsed, 16)}</td>
+            <td>${block.transactions.length}</td>
+            <td>${new Date(parseInt(block.timestamp, 16) * 1000).toLocaleString()}</td>
+            <td>${block.miner}</td>
+          </tr>
         `;
+        tableBody.innerHTML = row;
       } else {
-        blockDetails.style.display = "block";
-        blockDetailsContent.innerHTML = `<strong>Block not found!</strong>`;
+        alert("Block not found.");
       }
     }
 
-    function updateTable(blocks) {
-      const tableBody = document.querySelector("#blockTable tbody");
+    // Fetch Block Data by Block Number
+    async function fetchBlockData(blockNum, metric) {
+      const params = [`0x${blockNum.toString(16)}`, true];
+      const method = "eth_getBlockByNumber";
+
+      const response = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method,
+          params,
+          id: 1,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.result) {
+        const block = data.result;
+        switch (metric) {
+          case 'difficulty':
+            return parseInt(block.difficulty, 16);
+          case 'gasUsed':
+            return parseInt(block.gasUsed, 16);
+          case 'transactions':
+            return block.transactions.length;
+          default:
+            return null;
+        }
+      }
+      return null;
+    }
+
+    // Render Advanced Chart
+    async function renderAdvancedChart() {
+      const metric = document.getElementById("metric").value;
+      const startBlock = parseInt(document.getElementById("startBlock").value);
+      const endBlock = parseInt(document.getElementById("endBlock").value);
+      const interval = parseInt(document.getElementById("interval").value);
+
+      if (isNaN(startBlock) || isNaN(endBlock) || isNaN(interval)) {
+        alert("Please enter valid values for start block, end block, and interval.");
+        return;
+      }
+
+      const blocks = [];
+      const data = [];
+
+      for (let blockNum = startBlock; blockNum <= endBlock; blockNum += interval) {
+        blocks.push(blockNum);
+        const blockData = await fetchBlockData(blockNum, metric);
+        data.push(blockData);
+      }
+
+      // Destroy existing chart if present
+      if (chartInstance) {
+        chartInstance.destroy();
+      }
+
+      // Create new chart
+      chartInstance = new Chart(document.getElementById("advancedChart"), {
+        type: "line",
+        data: {
+          labels: blocks,
+          datasets: [{
+            label: metric.charAt(0).toUpperCase() + metric.slice(1),
+            data: data,
+            fill: false,
+            borderColor: '#FF5733',
+            tension: 0.1
+          }]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            x: {
+              title: { display: true, text: 'Block Number' }
+            },
+            y: {
+              title: { display: true, text: metric.charAt(0).toUpperCase() + metric.slice(1) }
+            }
+          }
+        }
+      });
+    }
+
+    // Fetch Wallet Transactions
+    async function searchWallet() {
+      const walletAddress = document.getElementById("walletAddress").value.trim();
+      const tableBody = document.querySelector("#walletTable tbody");
       tableBody.innerHTML = "";
 
-      blocks.forEach(block => {
+      if (!walletAddress) {
+        alert("Please enter a wallet address.");
+        return;
+      }
+
+      // Placeholder for wallet transactions, this can be integrated with an API
+      // Example to get transactions related to a wallet address
+      // You need an API endpoint for wallet transactions, currently mock data
+      const response = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "eth_getTransactionsByAddress",
+          params: [walletAddress],
+          id: 1
+        }),
+      });
+
+      const data = await response.json();
+      if (data.result && data.result.length > 0) {
+        data.result.forEach(tx => {
+          const row = `
+            <tr>
+              <td>${tx.hash}</td>
+              <td>${tx.from}</td>
+              <td>${tx.to}</td>
+              <td>${parseInt(tx.value, 16) / 1e18} ETH</td>
+              <td>${new Date(parseInt(tx.timestamp, 16) * 1000).toLocaleString()}</td>
+            </tr>
+          `;
+          tableBody.innerHTML += row;
+        });
+      } else {
+        alert("No transactions found.");
+      }
+    }
+
+    // Fetch Stats (24h transactions, circulating supply)
+    async function fetchStats() {
+      const transactions24h = 12345; // Example value
+      const circulatingSupply = 120000000; // Example value
+
+      document.getElementById("transactions24h").innerText = transactions24h;
+      document.getElementById("circulatingSupply").innerText = circulatingSupply;
+    }
+
+    // Fetch Rich Addresses
+    async function fetchRichAddresses() {
+      const richAddresses = [
+        { address: "0x123...", balance: "10000 ETH" },
+        { address: "0x456...", balance: "5000 ETH" },
+      ];
+
+      const tableBody = document.querySelector("#richAddressesTable tbody");
+      tableBody.innerHTML = "";
+
+      richAddresses.forEach(addr => {
         const row = `
           <tr>
-            <td>${block.number}</td>
-            <td>${block.difficulty}</td>
-            <td>${block.gasUsed}</td>
-            <td>${block.transactions}</td>
-            <td>${block.timestamp}</td>
-            <td>${block.miner}</td>
+            <td>${addr.address}</td>
+            <td>${addr.balance}</td>
           </tr>
         `;
         tableBody.innerHTML += row;
       });
     }
 
-    function renderChart(blocks) {
-      const canvas = document.getElementById("chart");
-      const ctx = canvas.getContext("2d");
-      const tooltip = document.getElementById("tooltip");
-      const margin = 40;
-      const width = canvas.width - margin * 2;
-      const height = canvas.height - margin * 2;
-
-      const maxDifficulty = Math.max(...blocks.map(block => block.difficulty));
-      const pointSpacing = width / (blocks.length - 1);
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      ctx.beginPath();
-      ctx.moveTo(margin, margin);
-      ctx.lineTo(margin, canvas.height - margin);
-      ctx.lineTo(canvas.width - margin, canvas.height - margin);
-      ctx.strokeStyle = "#000";
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(margin, canvas.height - margin - (blocks[0].difficulty / maxDifficulty) * height);
-      blocks.forEach((block, index) => {
-        const x = margin + index * pointSpacing;
-        const y = canvas.height - margin - (block.difficulty / maxDifficulty) * height;
-
-        ctx.lineTo(x, y);
-      });
-
-      ctx.strokeStyle = "blue"; // Blue line
-      ctx.lineWidth = 2; // Line thickness
-      ctx.stroke();
-
-      canvas.addEventListener("mousemove", (e) => {
-        const rect = canvas.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-
-        let closestBlock = null;
-        let minDistance = Infinity;
-
-        blocks.forEach((block, index) => {
-          const x = margin + index * pointSpacing;
-          const distance = Math.abs(mouseX - x);
-
-          if (distance < minDistance) {
-            minDistance = distance;
-            closestBlock = block;
-          }
-        });
-
-        if (closestBlock) {
-          tooltip.style.display = "block";
-          tooltip.style.left = `${e.pageX + 10}px`;
-          tooltip.style.top = `${e.pageY + 10}px`;
-          tooltip.innerHTML = `
-            <strong>Block Number:</strong> ${closestBlock.number}<br>
-            <strong>Difficulty:</strong> ${closestBlock.difficulty}<br>
-            <strong>Transactions:</strong> ${closestBlock.transactions}<br>
-            <strong>Timestamp:</strong> ${closestBlock.timestamp}
-          `;
-        } else {
-          tooltip.style.display = "none";
-        }
-      });
-
-      canvas.addEventListener("mouseleave", () => {
-        tooltip.style.display = "none";
-      });
-    }
+    // Initialize Stats and Rich Addresses
+    fetchStats();
+    fetchRichAddresses();
   </script>
 </body>
 </html>
