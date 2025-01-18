@@ -1,425 +1,290 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ethereum Block Explorer</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 20px;
-      background-color: #f9f9f9;
-      color: #333;
-      transition: background-color 0.3s, color 0.3s;
-    }
-    body.dark {
-      background-color: #121212;
-      color: #f0f0f0;
-    }
-    h1 {
-      text-align: center;
-    }
-    select, button, input {
-      margin: 10px;
-      padding: 5px 10px;
-      font-size: 16px;
-    }
-    .tabs {
-      display: flex;
-      justify-content: center;
-      margin-bottom: 20px;
-    }
-    .tab {
-      margin: 0 10px;
-      padding: 10px 20px;
-      cursor: pointer;
-      border: 1px solid #ddd;
-      border-radius: 5px;
-      background-color: #f0f0f0;
-    }
-    .tab.active {
-      background-color: #ddd;
-      font-weight: bold;
-    }
-    .content {
-      display: none;
-    }
-    .content.active {
-      display: block;
-    }
-    .dark .tab {
-      background-color: #333;
-      color: #f0f0f0;
-    }
-    .dark .tab.active {
-      background-color: #555;
-    }
-    .dark table, .dark input, .dark button, .dark select {
-      background-color: #222;
-      color: #f0f0f0;
-      border: 1px solid #444;
-    }
-    canvas {
-      display: block;
-      margin: 20px auto;
-      border: 1px solid #ddd;
-    }
-    #toggleDarkMode {
-      position: fixed;
-      top: 10px;
-      right: 10px;
-      cursor: pointer;
-      padding: 10px;
-      background-color: #ddd;
-      border: 1px solid #aaa;
-      border-radius: 5px;
-    }
-    body.dark #toggleDarkMode {
-      background-color: #555;
-      color: #fff;
-      border: 1px solid #333;
-    }
-    input[type="number"] {
-      width: 150px;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aplo Block Explorer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" />
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+
+        header {
+            background-color: #2d3748;
+            color: white;
+            padding: 20px 0;
+            text-align: center;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .search-bar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 20px;
+        }
+
+        .search-bar input {
+            width: 70%;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            outline: none;
+            margin-right: 10px;
+        }
+
+        .search-bar button {
+            padding: 12px 20px;
+            background-color: #4caf50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .search-bar button:hover {
+            background-color: #45a049;
+        }
+
+        .result h3 {
+            color: #2d3748;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 5px;
+            margin-bottom: 15px;
+        }
+
+        .result .label {
+            font-weight: bold;
+            color: #2b6cb0;
+        }
+
+        .result .value {
+            word-break: break-word;
+            color: #2d3748;
+        }
+
+        .result .address-link {
+            color: #2b6cb0;
+            text-decoration: none;
+        }
+
+        .result .address-link:hover {
+            text-decoration: underline;
+        }
+
+        .block-item {
+            margin-bottom: 15px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+
+        .block-item p {
+            margin: 5px 0;
+        }
+
+        .block-item a {
+            color: #4caf50;
+            text-decoration: none;
+        }
+
+        .block-item a:hover {
+            text-decoration: underline;
+        }
+
+        .transaction-item {
+            margin-bottom: 10px;
+        }
+
+        .footer {
+            margin-top: 40px;
+            text-align: center;
+            padding: 20px;
+            background-color: #2d3748;
+            color: white;
+            font-size: 14px;
+        }
+
+        .footer a {
+            color: #4caf50;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        #loadingMessage {
+            display: none;
+            text-align: center;
+            font-size: 18px;
+            color: #2d3748;
+        }
+    </style>
 </head>
+
 <body>
-  <h1>Ethereum Block Explorer</h1>
-  <button id="toggleDarkMode">Toggle Dark Mode</button>
 
-  <div class="tabs">
-    <div class="tab active" onclick="switchTab('explorer')">Block Explorer</div>
-    <div class="tab" onclick="switchTab('charts')">Advanced Charts</div>
-    <div class="tab" onclick="switchTab('walletSearch')">Wallet Search</div>
-    <div class="tab" onclick="switchTab('stats')">Stats</div>
-    <div class="tab" onclick="switchTab('richAddresses')">Rich Addresses</div>
-  </div>
+<header>
+    <h1>Aplo Block Explorer</h1>
+</header>
 
-  <!-- Block Explorer -->
-  <div class="content active" id="explorer">
-    <div style="text-align: center;">
-      <label for="blockSearch">Find Block:</label>
-      <input type="text" id="blockSearch" placeholder="Block number or hash">
-      <button onclick="findBlock()">Search</button>
+<div class="container">
+    <!-- Search Bar Section -->
+    <div class="search-bar">
+        <input type="text" id="addressInput" placeholder="Enter Aplo Address / Txn hash / Token" />
+        <button id="fetchBalanceBtn" disabled>Search</button>
     </div>
-    <table id="blockTable">
-      <thead>
-        <tr>
-          <th>Block Number</th>
-          <th>Difficulty</th>
-          <th>Gas Used</th>
-          <th>Transactions</th>
-          <th>Timestamp</th>
-          <th>Miner</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
 
-  <!-- Advanced Charts -->
-  <div class="content" id="charts">
-    <h3>Advanced Charts</h3>
-    <div style="text-align: center;">
-      <label for="metric">Select Metric:</label>
-      <select id="metric">
-        <option value="difficulty">Difficulty</option>
-        <option value="gasUsed">Gas Used</option>
-        <option value="transactions">Transactions</option>
-      </select>
+    <!-- Loading message -->
+    <div id="loadingMessage">Loading, please wait...</div>
 
-      <br><br>
+    <!-- Results Section -->
+    <div class="result" id="result"></div>
 
-      <label for="startBlock">Start Block:</label>
-      <input type="number" id="startBlock" placeholder="Start block" />
+    <!-- Last Blocks Section -->
+    <h3>Last Blocks</h3>
+    <div id="lastBlocks"></div>
+</div>
 
-      <label for="endBlock">End Block:</label>
-      <input type="number" id="endBlock" placeholder="End block" />
+<div class="footer">
+    <p>Powered by <a href="https://aplocoin.com">AploCoin</a>. AploCoin Explorer</p>
+</div>
 
-      <label for="interval">Interval (blocks):</label>
-      <input type="number" id="interval" placeholder="Block interval" value="10" />
+<!-- Include ethers.js library -->
+<script src="https://cdn.jsdelivr.net/npm/ethers@5.7.0/dist/ethers.umd.min.js"></script>
 
-      <button onclick="renderAdvancedChart()">Update Chart</button>
-    </div>
-    <canvas id="advancedChart" width="800" height="400"></canvas>
-  </div>
+<script>
+    let provider;
 
-  <!-- Wallet Search -->
-  <div class="content" id="walletSearch">
-    <div style="text-align: center;">
-      <label for="walletAddress">Wallet Address:</label>
-      <input type="text" id="walletAddress" placeholder="Enter wallet address">
-      <button onclick="searchWallet()">Search</button>
-    </div>
-    <table id="walletTable">
-      <thead>
-        <tr>
-          <th>Transaction Hash</th>
-          <th>From</th>
-          <th>To</th>
-          <th>Value</th>
-          <th>Timestamp</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-
-  <!-- Stats -->
-  <div class="content" id="stats">
-    <h3>24-Hour Stats</h3>
-    <div style="text-align: center;">
-      <p><strong>Transactions in the last 24 hours:</strong> <span id="transactions24h">Loading...</span></p>
-      <p><strong>Circulating Supply:</strong> <span id="circulatingSupply">Loading...</span></p>
-    </div>
-  </div>
-
-  <!-- Rich Addresses -->
-  <div class="content" id="richAddresses">
-    <h3>Rich Addresses</h3>
-    <div style="text-align: center;">
-      <table id="richAddressesTable">
-        <thead>
-          <tr>
-            <th>Address</th>
-            <th>Balance</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script>
-    const RPC_URL = "https://pub1.aplocoin.com";
-    let chartInstance = null;
-
-    // Dark Mode Toggle
-    document.getElementById("toggleDarkMode").addEventListener("click", () => {
-      document.body.classList.toggle("dark");
-    });
-
-    // Tab Switching
-    function switchTab(tab) {
-      document.querySelectorAll(".content").forEach(content => content.classList.remove("active"));
-      document.querySelector(`#${tab}`).classList.add("active");
-
-      document.querySelectorAll(".tab").forEach(tabEl => tabEl.classList.remove("active"));
-      document.querySelector(`.tab[onclick="switchTab('${tab}')"]`).classList.add("active");
-    }
-
-    // Find Block Function
-    async function findBlock() {
-      const searchInput = document.getElementById("blockSearch").value.trim();
-      const tableBody = document.querySelector("#blockTable tbody");
-      tableBody.innerHTML = "";
-
-      if (!searchInput) {
-        alert("Please enter a block number or hash.");
-        return;
-      }
-
-      const isNumber = !isNaN(searchInput);
-      const params = isNumber
-        ? [`0x${parseInt(searchInput).toString(16)}`, true]
-        : [searchInput, true];
-      const method = isNumber ? "eth_getBlockByNumber" : "eth_getBlockByHash";
-
-      const response = await fetch(RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method,
-          params,
-          id: 1,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.result) {
-        const block = data.result;
-        const row = `
-          <tr>
-            <td>${parseInt(block.number, 16)}</td>
-            <td>${parseInt(block.difficulty, 16)}</td>
-            <td>${parseInt(block.gasUsed, 16)}</td>
-            <td>${block.transactions.length}</td>
-            <td>${new Date(parseInt(block.timestamp, 16) * 1000).toLocaleString()}</td>
-            <td>${block.miner}</td>
-          </tr>
-        `;
-        tableBody.innerHTML = row;
-      } else {
-        alert("Block not found.");
-      }
-    }
-
-    // Fetch Block Data by Block Number
-    async function fetchBlockData(blockNum, metric) {
-      const params = [`0x${blockNum.toString(16)}`, true];
-      const method = "eth_getBlockByNumber";
-
-      const response = await fetch(RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method,
-          params,
-          id: 1,
-        }),
-      });
-
-      const data = await response.json();
-      if (data.result) {
-        const block = data.result;
-        switch (metric) {
-          case 'difficulty':
-            return parseInt(block.difficulty, 16);
-          case 'gasUsed':
-            return parseInt(block.gasUsed, 16);
-          case 'transactions':
-            return block.transactions.length;
-          default:
-            return null;
+    // Initialize the provider
+    async function initializeProvider() {
+        try {
+            provider = new ethers.providers.JsonRpcProvider('https://pub1.aplocoin.com');
+            document.getElementById('fetchBalanceBtn').disabled = false; // Enable search button
+            fetchLastBlocks(); // Fetch last blocks on initialization
+        } catch (error) {
+            alert("Error initializing provider: " + error.message);
         }
-      }
-      return null;
     }
 
-    // Render Advanced Chart
-    async function renderAdvancedChart() {
-      const metric = document.getElementById("metric").value;
-      const startBlock = parseInt(document.getElementById("startBlock").value);
-      const endBlock = parseInt(document.getElementById("endBlock").value);
-      const interval = parseInt(document.getElementById("interval").value);
+    window.onload = async () => {
+        await initializeProvider();
+    };
 
-      if (isNaN(startBlock) || isNaN(endBlock) || isNaN(interval)) {
-        alert("Please enter valid values for start block, end block, and interval.");
-        return;
-      }
+    // Fetch wallet balance and transactions
+    async function fetchBalance() {
+        const input = document.getElementById('addressInput').value.trim();
+        if (!input) {
+            alert('Please enter a valid Ethereum address.');
+            return;
+        }
 
-      const blocks = [];
-      const data = [];
+        if (ethers.utils.isAddress(input)) {
+            document.getElementById('loadingMessage').style.display = 'block';
 
-      for (let blockNum = startBlock; blockNum <= endBlock; blockNum += interval) {
-        blocks.push(blockNum);
-        const blockData = await fetchBlockData(blockNum, metric);
-        data.push(blockData);
-      }
-
-      // Destroy existing chart if present
-      if (chartInstance) {
-        chartInstance.destroy();
-      }
-
-      // Create new chart
-      chartInstance = new Chart(document.getElementById("advancedChart"), {
-        type: "line",
-        data: {
-          labels: blocks,
-          datasets: [{
-            label: metric.charAt(0).toUpperCase() + metric.slice(1),
-            data: data,
-            fill: false,
-            borderColor: '#FF5733',
-            tension: 0.1
-          }]
-        },
-        options: {
-          responsive: true,
-          scales: {
-            x: {
-              title: { display: true, text: 'Block Number' }
-            },
-            y: {
-              title: { display: true, text: metric.charAt(0).toUpperCase() + metric.slice(1) }
+            try {
+                await fetchWalletBalance(input);
+                await fetchGaploTokenBalance(input);
+                await fetchLastTransactions(input);
+            } catch (error) {
+                document.getElementById('result').innerHTML = `<p>Error: ${error.message}</p>`;
+            } finally {
+                document.getElementById('loadingMessage').style.display = 'none';
             }
-          }
+        } else {
+            alert('Invalid address format.');
         }
-      });
     }
 
-    // Fetch Wallet Transactions
-    async function searchWallet() {
-      const walletAddress = document.getElementById("walletAddress").value.trim();
-      const tableBody = document.querySelector("#walletTable tbody");
-      tableBody.innerHTML = "";
-
-      if (!walletAddress) {
-        alert("Please enter a wallet address.");
-        return;
-      }
-
-      // Placeholder for wallet transactions, this can be integrated with an API
-      // Example to get transactions related to a wallet address
-      // You need an API endpoint for wallet transactions, currently mock data
-      const response = await fetch(RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "eth_getTransactionsByAddress",
-          params: [walletAddress],
-          id: 1
-        }),
-      });
-
-      const data = await response.json();
-      if (data.result && data.result.length > 0) {
-        data.result.forEach(tx => {
-          const row = `
-            <tr>
-              <td>${tx.hash}</td>
-              <td>${tx.from}</td>
-              <td>${tx.to}</td>
-              <td>${parseInt(tx.value, 16) / 1e18} ETH</td>
-              <td>${new Date(parseInt(tx.timestamp, 16) * 1000).toLocaleString()}</td>
-            </tr>
-          `;
-          tableBody.innerHTML += row;
-        });
-      } else {
-        alert("No transactions found.");
-      }
-    }
-
-    // Fetch Stats (24h transactions, circulating supply)
-    async function fetchStats() {
-      const transactions24h = 12345; // Example value
-      const circulatingSupply = 120000000; // Example value
-
-      document.getElementById("transactions24h").innerText = transactions24h;
-      document.getElementById("circulatingSupply").innerText = circulatingSupply;
-    }
-
-    // Fetch Rich Addresses
-    async function fetchRichAddresses() {
-      const richAddresses = [
-        { address: "0x123...", balance: "10000 ETH" },
-        { address: "0x456...", balance: "5000 ETH" },
-      ];
-
-      const tableBody = document.querySelector("#richAddressesTable tbody");
-      tableBody.innerHTML = "";
-
-      richAddresses.forEach(addr => {
-        const row = `
-          <tr>
-            <td>${addr.address}</td>
-            <td>${addr.balance}</td>
-          </tr>
+    async function fetchWalletBalance(address) {
+        const balance = await provider.getBalance(address);
+        const formattedBalance = ethers.utils.formatEther(balance);
+        document.getElementById('result').innerHTML = `
+            <p><span class="label">Wallet Address:</span> <a href="https://explorer.aplocoin.com/account/${address}" target="_blank">${address}</a></p>
+            <p><span class="label">Balance:</span> ${formattedBalance} GAPLO</p>
+            <h3><span class="label">APLO Token Balance:</span></h3>
+            <p id="gaplo-balance">Loading...</p>
+            <h3><span class="label">Last 5 Transactions:</span></h3>
+            <ul id="transaction-list">Loading...</ul>
         `;
-        tableBody.innerHTML += row;
-      });
     }
 
-    // Initialize Stats and Rich Addresses
-    fetchStats();
-    fetchRichAddresses();
-  </script>
+    async function fetchGaploTokenBalance(address) {
+        const contractAddress = '0x0000000000000000000000000000000000001235'; // Replace with actual contract
+        const abi = ["function balanceOf(address owner) view returns (uint256)"];
+        const contract = new ethers.Contract(contractAddress, abi, provider);
+        const balance = await contract.balanceOf(address);
+        const formattedBalance = ethers.utils.formatUnits(balance, 18);
+        document.getElementById('gaplo-balance').innerHTML = `${formattedBalance} APLO`;
+    }
+
+    async function fetchLastTransactions(address) {
+        const blockNumber = await provider.getBlockNumber();
+        let transactions = [];
+        for (let i = 0; i < 50; i++) {
+            const block = await provider.getBlockWithTransactions(blockNumber - i);
+            transactions.push(...block.transactions.filter(tx => tx.from === address || tx.to === address));
+            if (transactions.length >= 5) break;
+        }
+        const txList = document.getElementById('transaction-list');
+        txList.innerHTML = transactions.slice(0, 5).map(tx => `
+            <li class="transaction-item">
+                <p><strong>Hash:</strong> <a href="https://explorer.aplocoin.com/tx/${tx.hash}" target="_blank">${tx.hash}</a></p>
+                <p><strong>From:</strong> ${tx.from}</p>
+                <p><strong>To:</strong> ${tx.to}</p>
+                <p><strong>Amount:</strong> ${ethers.utils.formatEther(tx.value)} GAPLO</p>
+            </li>
+        `).join('');
+    }
+
+    async function fetchLastBlocks() {
+        const blockContainer = document.getElementById('lastBlocks');
+        blockContainer.innerHTML = '<p>Loading last blocks...</p>';
+
+        const latestBlockNumber = await provider.getBlockNumber();
+        let blocks = [];
+        for (let i = 0; i < 10; i++) {
+            blocks.push(await provider.getBlock(latestBlockNumber - i));
+        }
+
+        blockContainer.innerHTML = blocks.map(block => `
+            <div class="block-item">
+                <p><strong>Block Number:</strong> <a href="https://explorer.aplocoin.com/block/${block.number}" target="_blank">${block.number}</a></p>
+                <p><strong>Timestamp:</strong> ${new Date(block.timestamp * 1000).toLocaleString()}</p>
+                <p><strong>Miner:</strong> ${block.miner}</p>
+                <p><strong>Transaction Count:</strong> ${block.transactions.length}</p>
+            </div>
+        `).join('');
+    }
+
+    document.getElementById('fetchBalanceBtn').addEventListener('click', fetchBalance);
+</script>
+
 </body>
 </html>
