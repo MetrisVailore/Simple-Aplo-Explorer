@@ -167,7 +167,15 @@
                 <div class="chart-container">
                     <div class="chart-header">
                         <h3><i class="fas fa-clock"></i> Block Time</h3>
-                        <span class="chart-badge" id="chartAvgBadge">Avg: -</span>
+                        <div class="chart-header-right">
+                            <div class="chart-timeframe" id="blockTimeChartTimeframe">
+                                <button class="timeframe-btn active" data-blocks="21">5 min</button>
+                                <button class="timeframe-btn" data-blocks="257">1 hour</button>
+                                <button class="timeframe-btn" data-blocks="1543">6 hours</button>
+                                <button class="timeframe-btn" data-blocks="6171">24 hours</button>
+                            </div>
+                            <span class="chart-badge" id="chartAvgBadge">Avg: -</span>
+                        </div>
                     </div>
                     <div class="chart-body">
                         <canvas id="blockTimeChart" width="600" height="200"></canvas>
@@ -178,7 +186,15 @@
                 <div class="chart-container">
                     <div class="chart-header">
                         <h3><i class="fas fa-signal"></i> Difficulty</h3>
-                        <span class="chart-badge" id="chartDiffBadge">Latest: -</span>
+                        <div class="chart-header-right">
+                            <div class="chart-timeframe" id="difficultyChartTimeframe">
+                                <button class="timeframe-btn active" data-blocks="21">5 min</button>
+                                <button class="timeframe-btn" data-blocks="257">1 hour</button>
+                                <button class="timeframe-btn" data-blocks="1543">6 hours</button>
+                                <button class="timeframe-btn" data-blocks="6171">24 hours</button>
+                            </div>
+                            <span class="chart-badge" id="chartDiffBadge">Latest: -</span>
+                        </div>
                     </div>
                     <div class="chart-body">
                         <canvas id="difficultyChart" width="600" height="200"></canvas>
@@ -189,7 +205,15 @@
                 <div class="chart-container">
                     <div class="chart-header">
                         <h3><i class="fas fa-gas-pump"></i> Gas Price (Gwei)</h3>
-                        <span class="chart-badge" id="chartGasBadge">Current: -</span>
+                        <div class="chart-header-right">
+                            <div class="chart-timeframe" id="gasPriceChartTimeframe">
+                                <button class="timeframe-btn active" data-blocks="21">5 min</button>
+                                <button class="timeframe-btn" data-blocks="257">1 hour</button>
+                                <button class="timeframe-btn" data-blocks="1543">6 hours</button>
+                                <button class="timeframe-btn" data-blocks="6171">24 hours</button>
+                            </div>
+                            <span class="chart-badge" id="chartGasBadge">Current: -</span>
+                        </div>
                     </div>
                     <div class="chart-body">
                         <canvas id="gasPriceChart" width="600" height="200"></canvas>
@@ -200,7 +224,15 @@
                 <div class="chart-container">
                     <div class="chart-header">
                         <h3><i class="fas fa-fire"></i> Gas Usage (%)</h3>
-                        <span class="chart-badge" id="chartGasUsageBadge">Avg: -</span>
+                        <div class="chart-header-right">
+                            <div class="chart-timeframe" id="gasUsageChartTimeframe">
+                                <button class="timeframe-btn active" data-blocks="21">5 min</button>
+                                <button class="timeframe-btn" data-blocks="257">1 hour</button>
+                                <button class="timeframe-btn" data-blocks="1543">6 hours</button>
+                                <button class="timeframe-btn" data-blocks="6171">24 hours</button>
+                            </div>
+                            <span class="chart-badge" id="chartGasUsageBadge">Avg: -</span>
+                        </div>
                     </div>
                     <div class="chart-body">
                         <canvas id="gasUsageChart" width="600" height="200"></canvas>
