@@ -403,7 +403,7 @@ if (block) {
 }
 
 async function fetchBlocksBatchRaw(blockNumbers, includeTransactions = false, onProgress = null) {
-    const BATCH_SIZE = 50;
+    const BATCH_SIZE = Math.max(50, Math.ceil(blockNumbers.length / 5)); // Aim for ~5 requests
     const MAX_RETRIES = 2;
     const allBlocks = [];
     const totalBlocks = blockNumbers.length;
@@ -474,7 +474,7 @@ async function fetchBlocksBatchRaw(blockNumbers, includeTransactions = false, on
 // Batch fetch transaction receipts (single HTTP request)
 async function fetchReceiptsBatch(txHashes) {
     if (!provider || txHashes.length === 0) return [];
-    const BATCH_SIZE = 50;
+    const BATCH_SIZE = Math.max(50, Math.ceil(txHashes.length / 5)); // Aim for ~5 requests
     const MAX_RETRIES = 2;
     const allReceipts = [];
     const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
@@ -864,10 +864,22 @@ async function loadDashboard() {
             difficultyData.reverse();
             gasUsageData.reverse();
 
-            // Gas price from recent block headers (eth_getBlockByNumber doesn't include gasPrice, but we can estimate)
-            // For gas price, we use the current gas price for now and track history
-            gasPriceHistory.push({ block: blockNumber, value: parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei')) });
-            if (gasPriceHistory.length > 50) gasPriceHistory.shift();
+            // Gas price from block headers (baseFeePerGas) or fallback to current gas price
+            gasPriceHistory = [];
+            let hasBaseFee = false;
+            for (const block of blocks) {
+                if (block.baseFeePerGas != null) {
+                    hasBaseFee = true;
+                    gasPriceHistory.push({ block: block.number, value: parseFloat(ethers.utils.formatUnits(block.baseFeePerGas, 'gwei')) });
+                }
+            }
+            if (!hasBaseFee) {
+                // Fallback: use current gas price for all blocks if chain has no baseFeePerGas
+                const gpVal = parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei'));
+                for (const block of blocks) {
+                    gasPriceHistory.push({ block: block.number, value: gpVal });
+                }
+            }
             gasPriceData = gasPriceHistory.slice().reverse();
 
             // Render all charts
@@ -1390,8 +1402,8 @@ async function loadTokenTransfers() {
 
         for (const r of blockResults) {
             if (transfers.length >= tokenTransfersPage * 20) break;
-            if (!b || !b.transactions) continue;
-            const txs = b.transactions;
+            if (!r || !r.transactions) continue;
+            const txs = r.transactions;
 
             // Batch fetch all receipts for this block
             const receiptResults = await parallelBatch(
@@ -1602,9 +1614,8 @@ function initTimeframeHandlers() {
         gasUsage: 'gasUsageChart'
     };
     const canvas = document.getElementById(canvasIdMap[chartType]);
-    let loadingOverlay = null;
-    // Cap blocks to prevent infinite loading (500 max)
-    blocksToFetch = Math.min(blocksToFetch, 6171);
+    let loadingOverlay = null;        // Cap blocks - with 100-block batches, 6171 blocks = ~62 requests
+        blocksToFetch = Math.min(blocksToFetch, 6171);
 
     try {
         // Show loading overlay on the chart
@@ -1613,7 +1624,7 @@ function initTimeframeHandlers() {
             parent.style.position = 'relative';
             loadingOverlay = document.createElement('div');
             loadingOverlay.className = 'chart-loading-overlay';
-            loadingOverlay.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+            loadingOverlay.innerHTML = '<div class="loading-text"><i class="fas fa-spinner fa-spin"></i> Loading...<div class="chart-progress-bar"><div class="chart-progress-fill" id="chartProgressFill"></div></div></div>';
             parent.appendChild(loadingOverlay);
         }
 
@@ -1626,8 +1637,18 @@ function initTimeframeHandlers() {
             blockNums.push(i);
         }
         
-        // Use JSON-RPC batch requests for much faster loading (single HTTP request)
-        const blocks = await fetchBlocksBatch(blockNums, chartType === 'gasUsage' || chartType === 'gasPrice');
+        // Use JSON-RPC batch requests with progress callback
+        const progressFill = document.getElementById('chartProgressFill');
+        const blocksRaw = await fetchBlocksBatch(blockNums, false, (loaded, total) => {
+            if (progressFill) {
+                progressFill.style.width = Math.round((loaded / total) * 100) + '%';
+            }
+        });
+        const blocks = blocksRaw.filter(b => b !== null);
+        
+        if (blocks.length === 0) {
+            throw new Error('No blocks fetched');
+        }
         
         // Update the specific chart data
         switch (chartType) {
@@ -1669,15 +1690,27 @@ function initTimeframeHandlers() {
                 break;
                 
             case 'gasPrice':
-                // For gas price, we need to track history
-                // Use current gas price as approximation for recent blocks
-                const gasPrice = await provider.getGasPrice().catch(() => ethers.BigNumber.from(0));
+                // Use baseFeePerGas from block headers (already in batch response) - no extra RPC call needed
                 gasPriceHistory = [];
+                let hasBaseFee = false;
                 for (const block of blocks) {
-                    gasPriceHistory.push({
-                        block: block.number,
-                        value: parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei'))
-                    });
+                    if (block.baseFeePerGas != null) {
+                        hasBaseFee = true;
+                        gasPriceHistory.push({
+                            block: block.number,
+                            value: parseFloat(ethers.utils.formatUnits(block.baseFeePerGas, 'gwei'))
+                        });
+                    }
+                }
+                // Fallback: if chain has no baseFeePerGas, use current gas price for all blocks
+                if (!hasBaseFee) {
+                    try {
+                        const currentGasPrice = await provider.getGasPrice().catch(() => ethers.BigNumber.from(0));
+                        const gpVal = parseFloat(ethers.utils.formatUnits(currentGasPrice, 'gwei'));
+                        for (const block of blocks) {
+                            gasPriceHistory.push({ block: block.number, value: gpVal });
+                        }
+                    } catch(e) {}
                 }
                 gasPriceData = gasPriceHistory.slice().reverse();
                 break;
