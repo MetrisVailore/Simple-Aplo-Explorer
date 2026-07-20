@@ -91,6 +91,130 @@ let previousBlockNumber = 0;
 // ERC-20 Transfer event signature
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
+// APLO ERC-20 Token (special contract address)
+const APLO_TOKEN_ADDRESS = '0x0000000000000000000000000000000000001235';
+
+// ERC-20 balanceOf(address) function selector: 0x70a08231
+async function getTokenBalance(tokenAddress, walletAddress) {
+    try {
+        const data = '0x70a08231' + walletAddress.slice(2).toLowerCase().padStart(64, '0');
+        const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+        const response = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'eth_call',
+                params: [{ to: tokenAddress, data: data }, 'latest'],
+                id: 1
+            })
+        });
+        const result = await response.json();
+        if (result.result && result.result !== '0x') {
+            return ethers.BigNumber.from(result.result);
+        }
+        return ethers.BigNumber.from(0);
+    } catch (error) {
+        console.warn('Failed to fetch token balance:', error);
+        return ethers.BigNumber.from(0);
+    }
+}
+
+// Batch fetch ERC-20 token names (single HTTP request)
+async function getTokenNamesBatch(tokenAddresses) {
+    if (!provider || tokenAddresses.length === 0) return [];
+    const MAX_RETRIES = 2;
+    const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+    const nameData = '0x06fdde03'; // name() function selector
+    
+    for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+        if (retry > 0) await new Promise(r => setTimeout(r, 100 * retry));
+        
+        const rpcBatch = tokenAddresses.map((tokenAddr, idx) => ({
+            jsonrpc: '2.0',
+            method: 'eth_call',
+            params: [{ to: tokenAddr, data: nameData }, 'latest'],
+            id: idx
+        }));
+        
+        try {
+            const response = await fetch(rpcUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(rpcBatch)
+            });
+            const results = await response.json();
+            if (Array.isArray(results) && results.length === tokenAddresses.length) {
+                return results.map(res => {
+                    if (res.result && res.result !== '0x' && res.result.length > 2) {
+                        try {
+                            // Decode ABI-encoded string: skip 32-byte offset + length prefix
+                            const hex = res.result.slice(130); // Skip offset(32) + length(32) = 64 hex chars
+                            const len = parseInt(res.result.slice(66, 130), 16);
+                            const nameHex = res.result.slice(130, 130 + len * 2);
+                            let name = '';
+                            for (let i = 0; i < nameHex.length; i += 2) {
+                                const code = parseInt(nameHex.substr(i, 2), 16);
+                                if (code > 0) name += String.fromCharCode(code);
+                            }
+                            return name.trim() || null;
+                        } catch(e) { return null; }
+                    }
+                    return null;
+                });
+            }
+        } catch (error) {
+            if (retry === MAX_RETRIES) {
+                console.warn('Failed to batch fetch token names:', error);
+            }
+        }
+    }
+    return tokenAddresses.map(() => null);
+}
+
+// Batch fetch multiple ERC-20 token balances (single HTTP request)
+async function getTokenBalancesBatch(tokenAddresses, walletAddress) {
+    if (!provider || tokenAddresses.length === 0) return [];
+    const MAX_RETRIES = 2;
+    const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+    const addrData = '0x70a08231' + walletAddress.slice(2).toLowerCase().padStart(64, '0');
+    
+    for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+        if (retry > 0) await new Promise(r => setTimeout(r, 100 * retry));
+        
+        const rpcBatch = tokenAddresses.map((tokenAddr, idx) => ({
+            jsonrpc: '2.0',
+            method: 'eth_call',
+            params: [{ to: tokenAddr, data: addrData }, 'latest'],
+            id: idx
+        }));
+        
+        try {
+            const response = await fetch(rpcUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(rpcBatch)
+            });
+            const results = await response.json();
+            if (Array.isArray(results) && results.length === tokenAddresses.length) {
+                return results.map(res => {
+                    if (res.result && res.result !== '0x') {
+                        return ethers.BigNumber.from(res.result);
+                    }
+                    return ethers.BigNumber.from(0);
+                });
+            }
+        } catch (error) {
+            if (retry === MAX_RETRIES) {
+                console.warn('Failed to batch fetch token balances after retries:', error);
+            }
+        }
+    }
+    return tokenAddresses.map(() => ethers.BigNumber.from(0));
+}
+
+
+
 // Rate Limiter - prevents flooding the RPC node
 class RateLimiter {
     constructor(minIntervalMs = 200) {
@@ -123,6 +247,8 @@ let difficultyData = [];
 let gasPriceData = [];
 let gasUsageData = [];
 let gasPriceHistory = [];
+
+
 
 // Chart hover state per canvas
 let chartStates = {};
@@ -224,6 +350,236 @@ async function parallelBatch(items, fn, concurrency = 10) {
 }
 
 // ========================================
+// JSON-RPC Batch Fetching (Single HTTP Request)
+// ========================================
+const blockBatchCache = new Map(); // Simple in-memory cache for batch results
+const MAX_CACHE_SIZE = 500;
+
+async function fetchBlocksBatch(blockNumbers, includeTransactions = false, onProgress = null) {
+    if (!provider || blockNumbers.length === 0) return [];
+    
+    // Check cache first (only for non-transaction requests)
+    if (!includeTransactions) {
+        const cached = [];
+        const toFetch = [];
+        for (const num of blockNumbers) {
+            const cacheKey = `block_${num}`;
+            if (blockBatchCache.has(cacheKey)) {
+                cached.push(blockBatchCache.get(cacheKey));
+            } else {
+                cached.push(null);
+                toFetch.push(num);
+            }
+        }
+        
+        // If all blocks are cached, return immediately
+        if (toFetch.length === 0) return cached;
+        
+        // Fetch missing blocks in batch
+        const fetched = await fetchBlocksBatchRaw(toFetch, false);
+        
+        // Merge results and update cache
+        const result = [];
+        let fetchIdx = 0;
+        for (let i = 0; i < blockNumbers.length; i++) {
+            if (cached[i]) {
+                result.push(cached[i]);
+            } else {
+                const block = fetched[fetchIdx++];
+if (block) {
+                    blockBatchCache.set(`block_${block.number}`, block);
+                    if (blockBatchCache.size > MAX_CACHE_SIZE) {
+                        const firstKey = blockBatchCache.keys().next().value;
+                        blockBatchCache.delete(firstKey);
+                    }
+                }
+                result.push(block);
+            }
+        }
+        return result;
+    }
+    
+    return fetchBlocksBatchRaw(blockNumbers, includeTransactions, onProgress);
+}
+
+async function fetchBlocksBatchRaw(blockNumbers, includeTransactions = false, onProgress = null) {
+    const BATCH_SIZE = 50;
+    const MAX_RETRIES = 2;
+    const allBlocks = [];
+    const totalBlocks = blockNumbers.length;
+    
+    for (let i = 0; i < blockNumbers.length; i += BATCH_SIZE) {
+        const batch = blockNumbers.slice(i, i + BATCH_SIZE);
+        let batchResults = null;
+        
+        // Report progress
+        if (onProgress) {
+            onProgress(Math.min(i + BATCH_SIZE, totalBlocks), totalBlocks);
+        }
+        
+        for (let retry = 0; retry <= MAX_RETRIES && !batchResults; retry++) {
+            if (retry > 0) await new Promise(r => setTimeout(r, 100 * retry));
+            
+            const rpcBatch = batch.map((num, idx) => ({
+                jsonrpc: '2.0',
+                method: 'eth_getBlockByNumber',
+                params: ['0x' + num.toString(16), includeTransactions],
+                id: idx
+            }));
+            
+            try {
+                const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+                const response = await fetch(rpcUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(rpcBatch)
+                });
+                const results = await response.json();
+                
+                if (Array.isArray(results)) {
+                    batchResults = results.map(res => {
+                        if (res.result) {
+                            return {
+                                number: parseInt(res.result.number, 16),
+                                timestamp: parseInt(res.result.timestamp, 16),
+                                transactions: res.result.transactions || [],
+                                gasUsed: res.result.gasUsed ? parseInt(res.result.gasUsed, 16) : 0,
+                                gasLimit: res.result.gasLimit ? parseInt(res.result.gasLimit, 16) : 0,
+                                miner: res.result.miner || 'Unknown',
+                                difficulty: res.result.difficulty ? parseInt(res.result.difficulty, 16) : 0,
+                                baseFeePerGas: res.result.baseFeePerGas ? parseInt(res.result.baseFeePerGas, 16) : null
+                            };
+                        }
+                        return null;
+                    });
+                }
+            } catch (error) {
+                if (retry === MAX_RETRIES) {
+                    console.warn(`Batch fetch failed for blocks ${batch[0]}-${batch[batch.length-1]}:`, error);
+                }
+            }
+        }
+        
+        // Add results (either successful or nulls from failed batch)
+        if (batchResults) {
+            allBlocks.push(...batchResults);
+        } else {
+            batch.forEach(() => allBlocks.push(null));
+        }
+    }
+    
+    return allBlocks;
+}
+
+// Batch fetch transaction receipts (single HTTP request)
+async function fetchReceiptsBatch(txHashes) {
+    if (!provider || txHashes.length === 0) return [];
+    const BATCH_SIZE = 50;
+    const MAX_RETRIES = 2;
+    const allReceipts = [];
+    const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+    
+    for (let i = 0; i < txHashes.length; i += BATCH_SIZE) {
+        const batch = txHashes.slice(i, i + BATCH_SIZE);
+        let batchResults = null;
+        
+        for (let retry = 0; retry <= MAX_RETRIES && !batchResults; retry++) {
+            if (retry > 0) await new Promise(r => setTimeout(r, 100 * retry));
+            
+            const rpcBatch = batch.map((hash, idx) => ({
+                jsonrpc: '2.0',
+                method: 'eth_getTransactionReceipt',
+                params: [hash],
+                id: idx
+            }));
+            
+            try {
+                const response = await fetch(rpcUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(rpcBatch)
+                });
+                const results = await response.json();
+                if (Array.isArray(results)) {
+                    batchResults = results.map(res => res.result || null);
+                }
+            } catch (error) {
+                if (retry === MAX_RETRIES) {
+                    console.warn(`Receipt batch fetch failed after ${MAX_RETRIES + 1} attempts:`, error);
+                }
+            }
+        }
+        
+        if (batchResults) {
+            allReceipts.push(...batchResults);
+        } else {
+            batch.forEach(() => allReceipts.push(null));
+        }
+    }
+    return allReceipts;
+}
+
+// ========================================
+// eth_getLogs for efficient ERC-20 transfer discovery (single RPC call for 100k+ blocks)
+// ========================================
+async function fetchLogsByAddress(address, fromBlock, toBlock) {
+    if (!provider) return [];
+    const MAX_RETRIES = 2;
+    const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+    const addrPadded = '0x' + address.slice(2).toLowerCase().padStart(64, '0');
+    
+    for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+        if (retry > 0) await new Promise(r => setTimeout(r, 200 * retry));
+        
+        const rpcBatch = [
+            {
+                jsonrpc: '2.0',
+                method: 'eth_getLogs',
+                params: [{
+                    fromBlock: '0x' + fromBlock.toString(16),
+                    toBlock: '0x' + toBlock.toString(16),
+                    topics: [TRANSFER_TOPIC, null, addrPadded]
+                }],
+                id: 0
+            },
+            {
+                jsonrpc: '2.0',
+                method: 'eth_getLogs',
+                params: [{
+                    fromBlock: '0x' + fromBlock.toString(16),
+                    toBlock: '0x' + toBlock.toString(16),
+                    topics: [TRANSFER_TOPIC, addrPadded, null]
+                }],
+                id: 1
+            }
+        ];
+        
+        try {
+            const response = await fetch(rpcUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(rpcBatch)
+            });
+            const results = await response.json();
+            const allLogs = [];
+            if (Array.isArray(results)) {
+                for (const res of results) {
+                    if (res.result && Array.isArray(res.result)) {
+                        allLogs.push(...res.result);
+                    }
+                }
+            }
+            return allLogs;
+        } catch (error) {
+            if (retry === MAX_RETRIES) {
+                console.warn('eth_getLogs failed after retries:', error);
+            }
+        }
+    }
+    return [];
+}
+
+// ========================================
 // Theme Management
 // ========================================
 function initTheme() {
@@ -268,6 +624,7 @@ async function init() {
         loadDashboard();
         startLiveUpdates();
         startBackgroundPreloader();
+        initTimeframeHandlers();
 
         // Auto-refresh dashboard
         setInterval(() => {
@@ -466,14 +823,12 @@ async function loadDashboard() {
         if (gasEl) gasEl.textContent = ethers.utils.formatUnits(gasPrice, 'gwei') + ' Gwei';
         document.getElementById('peerCount').textContent = parseInt(peerCount, 16);
 
-        // Fetch blocks for stats and chart (reduced from 52 to 30)
-        const blockPromises = [];
+        // Fetch blocks for stats and chart using batch RPC (single HTTP request)
+        const blockNums = [];
         for (let i = 0; i < 30; i++) {
-            blockPromises.push(getBlockCached(blockNumber - i));
+            blockNums.push(blockNumber - i);
         }
-        const blocks = (await Promise.allSettled(blockPromises))
-            .filter(r => r.status === 'fulfilled' && r.value)
-            .map(r => r.value);
+        const blocks = (await fetchBlocksBatch(blockNums, false)).filter(b => b !== null);
 
         // Calculate avg block time
         let avgTime = 14;
@@ -501,8 +856,8 @@ async function loadDashboard() {
                 blockTimeData.push({ block: blocks[i].number, value: blocks[i].timestamp - blocks[i + 1].timestamp });
                 difficultyData.push({ block: blocks[i].number, value: Number(blocks[i].difficulty) || 0 });
                 const gu = blocks[i].gasUsed, gl = blocks[i].gasLimit;
-                if (gu && gl && gl.toNumber() > 0) {
-                    gasUsageData.push({ block: blocks[i].number, value: (gu.toNumber() / gl.toNumber()) * 100 });
+                if (gu && gl && Number(gl) > 0) {
+                    gasUsageData.push({ block: blocks[i].number, value: (Number(gu) / Number(gl)) * 100 });
                 }
             }
             blockTimeData.reverse();
@@ -539,30 +894,30 @@ async function loadDashboard() {
         const blocksHtml = blocks.slice(0, 10).map(b => createBlockItemHtml(b));
         document.getElementById('latestBlocks').innerHTML = blocksHtml.join('');
 
-        // Load latest transactions (reduced from 5 to 3 blocks)
-        const txBlockPromises = [];
-        for (let i = 0; i < 3; i++) {
-            txBlockPromises.push(getBlockWithTxsCached(blockNumber - i));
+        // Load latest transactions from 10 blocks for more coverage
+        // Fetch transaction blocks using batch RPC (single HTTP request)
+        const txBlockNums = [];
+        for (let i = 0; i < 10; i++) {
+            txBlockNums.push(blockNumber - i);
         }
-        const txBlocks = (await Promise.allSettled(txBlockPromises))
-            .filter(r => r.status === 'fulfilled' && r.value)
-            .map(r => r.value);
+        const txBlocks = (await fetchBlocksBatch(txBlockNums, true)).filter(b => b !== null);
 
         const txsHtml = [];
         let txCount = 0;
         for (const block of txBlocks) {
-            if (txCount >= 15) break;
+            if (txCount >= 25) break;
             if (block.transactions) {
-                const recent = block.transactions.slice(-10).reverse();
-                for (const tx of recent) {
-                    if (txCount >= 15) break;
+                // Show all transactions from each block (newest first)
+                const txs = block.transactions.slice().reverse();
+                for (const tx of txs) {
+                    if (txCount >= 25) break;
                     txsHtml.push(createTxItemHtml(tx, block.timestamp));
                     txCount++;
                 }
             }
         }
         document.getElementById('latestTransactions').innerHTML =
-            txsHtml.length > 0 ? txsHtml.join('') : '<div class="empty-state"><i class="fas fa-inbox"></i><p>No transactions found</p></div>';
+            txsHtml.length > 0 ? txsHtml.join('') : '<div class="empty-state"><i class="fas fa-inbox"></i><p>No transactions in recent blocks</p><p class="sub">Try the <a href="#" onclick="navigateTo(\'transactions\')">Transactions page</a> for older data</p></div>';
 
         // Update hero tx count
         let totalTxs = 0;
@@ -683,12 +1038,17 @@ function drawInteractiveChart(canvasId, data, opts) {
     const gridColor = isDark ? '#1e2a42' : '#e2e8f0';
     const lineColor = isDark ? opts.color : opts.colorLight;
     const fillColor = isDark ? opts.fillColor : opts.fillColorLight;
-    const hoverColor = lineColor;
-
-    const values = data.map(d => d.value);
-    const maxVal = Math.max(...values) * 1.15;
-    const minVal = Math.min(...values) * 0.85;
-    const range = maxVal - minVal || 1;
+    const hoverColor = lineColor;        const values = data.map(d => d.value).filter(v => v != null && !isNaN(v) && isFinite(v));
+        if (values.length === 0) {
+            ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#999';
+            ctx.font = '13px Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No data available', canvas.width / 2, canvas.height / 2);
+            return;
+        }
+        const maxVal = (Math.max(...values) || 1) * 1.15;
+        const minVal = (Math.min(...values) || 0) * 0.85;
+        const range = maxVal - minVal || 1;
     const stepX = chartW / (data.length - 1);
 
     // Init hover state
@@ -744,11 +1104,12 @@ function drawInteractiveChart(canvasId, data, opts) {
         ctx.lineWidth = 2;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
-        data.forEach((d, i) => {
-            const x = padding.left + i * stepX;
-            const y = padding.top + chartH - ((d.value - minVal) / range) * chartH;
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        });
+data.forEach((d, i) => {
+    if (d.value == null || isNaN(d.value) || !isFinite(d.value)) return;
+    const x = padding.left + i * stepX;
+    const y = padding.top + chartH - ((d.value - minVal) / range) * chartH;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+});
         ctx.stroke();
 
         // Hover crosshair and tooltip
@@ -776,10 +1137,12 @@ function drawInteractiveChart(canvasId, data, opts) {
             ctx.setLineDash([]);
 
             // Data point with glow
-            ctx.beginPath();
-            ctx.arc(x, y, 5, 0, Math.PI * 2);
-            ctx.fillStyle = hoverColor;
-            ctx.fill();
+            if (d && d.value != null && !isNaN(d.value)) {
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fillStyle = hoverColor;
+                ctx.fill();
+            }
             ctx.beginPath();
             ctx.arc(x, y, 9, 0, Math.PI * 2);
             ctx.fillStyle = hoverColor + '25';
@@ -911,7 +1274,7 @@ function createTxItemHtml(tx, blockTimestamp) {
                 </div>
             </div>
             <div class="item-right">
-                <div class="value">${parseFloat(value).toFixed(4)} APLO</div>
+                <div class="value">${parseFloat(value).toFixed(4)} GAPLO</div>
                 <div class="sub">Block #${tx.blockNumber || '-'}</div>
             </div>
         </div>
@@ -981,24 +1344,29 @@ async function loadRecentTokenTransfers(blocks) {
                 </div>
             </div>
             <div class="item-right">
-                <div class="value">${formatTokenValue(t.value)}</div>
+                <div class="value">${formatTokenValue(t.value, t.contractAddress)}</div>
                 <div class="sub"><span class="hash-link" onclick="navigateTo('address', '${t.contractAddress}')">${truncateHash(t.contractAddress)}</span></div>
             </div>
         </div>
     `).join('');
 }
 
-function formatTokenValue(value) {
+function formatTokenValue(value, contractAddress = '') {
     try {
+        const isAPLOToken = contractAddress && contractAddress.toLowerCase() === APLO_TOKEN_ADDRESS.toLowerCase();
+        const symbol = isAPLOToken ? 'APLO' : 'tokens';
         const str = value.toString();
+        let formatted;
         if (str.length > 18) {
             const intPart = str.slice(0, str.length - 18);
             const decPart = str.slice(str.length - 18, str.length - 14);
-            return intPart + '.' + decPart;
+            formatted = intPart + '.' + decPart;
+        } else {
+            formatted = '0.' + str.padStart(18, '0').slice(0, 4);
         }
-        return '0.' + str.padStart(18, '0').slice(0, 4);
+        return formatted + ' ' + symbol;
     } catch (e) {
-        return value.toString();
+        return value.toString() + ' tokens';
     }
 }
 
@@ -1018,12 +1386,12 @@ async function loadTokenTransfers() {
         for (let i = latestBlock; i >= Math.max(0, latestBlock - 100) && blockNumbers.length < 30; i--) {
             blockNumbers.push(i);
         }
-        const blockResults = await parallelBatch(blockNumbers, (n) => getBlockWithTxsCached(n), 5);
+        const blockResults = await fetchBlocksBatch(blockNumbers, true);
 
         for (const r of blockResults) {
             if (transfers.length >= tokenTransfersPage * 20) break;
-            if (r.status !== 'fulfilled' || !r.value || !r.value.transactions) continue;
-            const txs = r.value.transactions.slice(0, 30);
+            if (!b || !b.transactions) continue;
+            const txs = b.transactions;
 
             // Batch fetch all receipts for this block
             const receiptResults = await parallelBatch(
@@ -1051,7 +1419,7 @@ async function loadTokenTransfers() {
                 <td>${t.blockNumber}</td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${t.from}')">${truncateHash(t.from)}</span></td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${t.to}')">${truncateHash(t.to)}</span></td>
-                <td>${formatTokenValue(t.value)}</td>
+                <td>${formatTokenValue(t.value, t.contractAddress)}</td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${t.contractAddress}')">${truncateHash(t.contractAddress)}</span></td>
             </tr>
         `).join('') || '<tr><td colspan="6" class="loading-cell">No token transfers found</td></tr>';
@@ -1118,11 +1486,10 @@ async function loadValidators() {
             blockNumbers.push(i);
         }
 
-        const results = await parallelBatch(blockNumbers, (num) => getBlockCached(num), 15);
+        const blocks = await fetchBlocksBatch(blockNumbers, false);
 
-        for (const r of results) {
-            if (r.status !== 'fulfilled' || !r.value) continue;
-            const b = r.value;
+        for (const b of blocks) {
+            if (!b) continue;
             if (b.miner) {
                 minerCounts[b.miner] = (minerCounts[b.miner] || 0) + 1;
                 if (!minerLastBlock[b.miner] || b.number > minerLastBlock[b.miner]) {
@@ -1167,16 +1534,15 @@ async function loadBlocks() {
         const nums = [];
         for (let i = startBlock; i >= endBlock; i--) nums.push(i);
 
-        const results = await parallelBatch(nums, (n) => getBlockCached(n), 10);
-        const blocks = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+        const blocks = (await fetchBlocksBatch(nums, false)).filter(b => b !== null);
 
         tbody.innerHTML = blocks.map(b => `
             <tr>
                 <td><span class="hash-link" onclick="navigateTo('block-detail', ${b.number})">${b.number}</span></td>
                 <td>${getTimeAgo(b.timestamp)}</td>
                 <td>${b.transactions ? b.transactions.length : 0}</td>
-                <td>${b.gasUsed ? b.gasUsed.toNumber().toLocaleString() : '-'}</td>
-                <td>${b.gasLimit ? b.gasLimit.toNumber().toLocaleString() : '-'}</td>
+                <td>${b.gasUsed ? Number(b.gasUsed).toLocaleString() : '-'}</td>
+                <td>${b.gasLimit ? Number(b.gasLimit).toLocaleString() : '-'}</td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${b.miner}')">${truncateHash(b.miner)}</span></td>
             </tr>
         `).join('');
@@ -1208,6 +1574,191 @@ function renderBlocksPagination(latestBlock) {
 function goToBlocksPage(p) { if (p < 1) return; blocksPage = p; loadBlocks(); }
 
 // ========================================
+// Chart Timeframe Handlers
+// ========================================
+function initTimeframeHandlers() {
+    // Add click handlers to all timeframe buttons
+    document.querySelectorAll('.chart-timeframe').forEach(container => {
+        const chartType = container.id.replace('ChartTimeframe', '').replace('Chart', '');
+        container.querySelectorAll('.timeframe-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                // Update active state
+                container.querySelectorAll('.timeframe-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                // Update timeframe
+                const blocks = parseInt(btn.dataset.blocks);
+                
+                // Reload chart data
+                loadChartForTimeframe(chartType, blocks);
+            });
+        });
+    });
+}async function loadChartForTimeframe(chartType, blocksToFetch) {
+    const canvasIdMap = {
+        blockTime: 'blockTimeChart',
+        difficulty: 'difficultyChart',
+        gasPrice: 'gasPriceChart',
+        gasUsage: 'gasUsageChart'
+    };
+    const canvas = document.getElementById(canvasIdMap[chartType]);
+    let loadingOverlay = null;
+    // Cap blocks to prevent infinite loading (500 max)
+    blocksToFetch = Math.min(blocksToFetch, 6171);
+
+    try {
+        // Show loading overlay on the chart
+        if (canvas && canvas.parentElement) {
+            const parent = canvas.parentElement;
+            parent.style.position = 'relative';
+            loadingOverlay = document.createElement('div');
+            loadingOverlay.className = 'chart-loading-overlay';
+            loadingOverlay.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+            parent.appendChild(loadingOverlay);
+        }
+
+        const blockNumber = await provider.getBlockNumber();
+        const startBlock = Math.max(0, blockNumber - blocksToFetch);
+        
+        // Build array of block numbers to fetch
+        const blockNums = [];
+        for (let i = blockNumber; i > startBlock; i--) {
+            blockNums.push(i);
+        }
+        
+        // Use JSON-RPC batch requests for much faster loading (single HTTP request)
+        const blocks = await fetchBlocksBatch(blockNums, chartType === 'gasUsage' || chartType === 'gasPrice');
+        
+        // Update the specific chart data
+        switch (chartType) {
+            case 'blockTime':
+                blockTimeData = [];
+                for (let i = 0; i < blocks.length - 1; i++) {
+                    blockTimeData.push({
+                        block: blocks[i].number,
+                        value: blocks[i].timestamp - blocks[i + 1].timestamp
+                    });
+                }
+                blockTimeData.reverse();
+                break;
+                
+            case 'difficulty':
+                difficultyData = [];
+                for (let i = 0; i < blocks.length; i++) {
+                    difficultyData.push({
+                        block: blocks[i].number,
+                        value: Number(blocks[i].difficulty) || 0
+                    });
+                }
+                difficultyData.reverse();
+                break;
+                
+            case 'gasUsage':
+                gasUsageData = [];
+                for (let i = 0; i < blocks.length; i++) {
+                    const gu = blocks[i].gasUsed;
+                    const gl = blocks[i].gasLimit;
+                    if (gu && gl && Number(gl) > 0) {
+                        gasUsageData.push({
+                            block: blocks[i].number,
+                            value: (Number(gu) / Number(gl)) * 100
+                        });
+                    }
+                }
+                gasUsageData.reverse();
+                break;
+                
+            case 'gasPrice':
+                // For gas price, we need to track history
+                // Use current gas price as approximation for recent blocks
+                const gasPrice = await provider.getGasPrice().catch(() => ethers.BigNumber.from(0));
+                gasPriceHistory = [];
+                for (const block of blocks) {
+                    gasPriceHistory.push({
+                        block: block.number,
+                        value: parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei'))
+                    });
+                }
+                gasPriceData = gasPriceHistory.slice().reverse();
+                break;
+        }
+        
+        // Re-render the specific chart
+        const chartConfig = CHARTS.find(c => {
+            switch (chartType) {
+                case 'blockTime': return c.id === 'blockTimeChart';
+                case 'difficulty': return c.id === 'difficultyChart';
+                case 'gasPrice': return c.id === 'gasPriceChart';
+                case 'gasUsage': return c.id === 'gasUsageChart';
+                default: return false;
+            }
+        });
+        
+        if (chartConfig) {
+            const data = chartConfig.getData();
+            if (data && data.length > 1) {
+                drawInteractiveChart(chartConfig.id, data, {
+                    color: chartConfig.color,
+                    colorLight: chartConfig.colorLight,
+                    fillColor: chartConfig.fill,
+                    fillColorLight: chartConfig.fillLight,
+                    tooltipFn: chartConfig.tip,
+                    valueFn: chartConfig.vfn
+                });
+            }
+        }
+        
+        // Update chart badges with new data
+        updateChartBadges(chartType, blocks);
+        
+    } catch (error) {
+        console.error(`Error loading ${chartType} chart:`, error);
+    } finally {
+        // Remove loading overlay
+        if (loadingOverlay && loadingOverlay.parentElement) {
+            loadingOverlay.parentElement.removeChild(loadingOverlay);
+        }
+    }
+}
+
+function updateChartBadges(chartType, blocks) {
+    try {
+        switch (chartType) {
+            case 'blockTime': {
+                let avgTime = 14;
+                if (blocks.length >= 2) {
+                    const timeDiff = blocks[0].timestamp - blocks[blocks.length - 1].timestamp;
+                    avgTime = timeDiff / (blocks.length - 1);
+                }
+                document.getElementById('chartAvgBadge').textContent = 'Avg: ' + avgTime.toFixed(1) + 's';
+                break;
+            }
+            case 'difficulty': {
+                const diff = blocks.length > 0 ? Number(blocks[0].difficulty) || 0 : 0;
+                document.getElementById('chartDiffBadge').textContent = 'Latest: ' + formatLargeNumber(diff);
+                break;
+            }
+            case 'gasPrice': {
+                // gasPriceData is reversed, so last element is newest
+                const latest = gasPriceData.length > 0 ? gasPriceData[gasPriceData.length - 1].value : 0;
+                document.getElementById('chartGasBadge').textContent = 'Current: ' + latest.toFixed(2) + ' Gwei';
+                break;
+            }
+            case 'gasUsage': {
+                let avgGas = 0;
+                if (gasUsageData.length > 0) {
+                    avgGas = gasUsageData.reduce((s, d) => s + d.value, 0) / gasUsageData.length;
+                }
+                document.getElementById('chartGasUsageBadge').textContent = 'Avg: ' + avgGas.toFixed(1) + '%';
+                break;
+            }
+        }
+    } catch (e) {
+        console.error('Error updating chart badge:', e);
+    }
+}
+
+// ========================================
 // Transactions Page
 // ========================================
 async function loadTransactions() {
@@ -1217,14 +1768,13 @@ async function loadTransactions() {
     try {
         const latestBlock = await provider.getBlockNumber();
         const blockNums = [];
-        for (let i = latestBlock; i >= Math.max(0, latestBlock - 50); i--) blockNums.push(i);
+        for (let i = latestBlock; i >= Math.max(0, latestBlock - 200); i--) blockNums.push(i);
 
-        const results = await parallelBatch(blockNums, (n) => getBlockWithTxsCached(n), 5);
+        const blocks = await fetchBlocksBatch(blockNums, true);
         const allTxs = [];
 
-        for (const r of results) {
-            if (r.status !== 'fulfilled' || !r.value) continue;
-            const b = r.value;
+        for (const b of blocks) {
+            if (!b) continue;
             if (b.transactions) {
                 for (const tx of b.transactions) {
                     allTxs.push({ ...tx, blockTimestamp: b.timestamp });
@@ -1254,7 +1804,7 @@ async function loadTransactions() {
             const value = ethers.utils.formatEther(tx.value);
             let txFee = '-';
             if (tx.gasUsed && tx.gasPrice) {
-                txFee = parseFloat(ethers.utils.formatEther(tx.gasUsed.mul(tx.gasPrice))).toFixed(6) + ' APLO';
+                txFee = parseFloat(ethers.utils.formatEther(tx.gasUsed.mul(tx.gasPrice))).toFixed(6) + ' GAPLO';
             }
             return `
                 <tr>
@@ -1262,13 +1812,14 @@ async function loadTransactions() {
                     <td><span class="hash-link" onclick="navigateTo('block-detail', ${tx.blockNumber})">${tx.blockNumber || '-'}</span></td>
                     <td><span class="hash-link" onclick="navigateTo('address', '${tx.from}')">${truncateHash(tx.from)}</span></td>
                     <td>${tx.to ? `<span class="hash-link" onclick="navigateTo('address', '${tx.to}')">${truncateHash(tx.to)}</span>` : '<em>Contract</em>'}</td>
-                    <td>${parseFloat(value).toFixed(4)} APLO</td>
+                    <td>${parseFloat(value).toFixed(4)} GAPLO</td>
                     <td>${txFee}</td>
                 </tr>
             `;
-        }).join('') || '<tr><td colspan="6" class="loading-cell">No transactions found</td></tr>';
+        }).join('') || '<tr><td colspan="6" class="loading-cell">No transactions in recent blocks</td></tr>';
 
-        renderSimplePagination('transactionsPagination', txsPage, 100, (p) => {
+        const totalTxPages = Math.max(1, Math.ceil(allTxs.length / txsPerPage));
+        renderSimplePagination('transactionsPagination', txsPage, totalTxPages, (p) => {
             txsPage = p;
             loadTransactions();
         });
@@ -1289,7 +1840,7 @@ async function loadBlockDetail(blockNumber) {
         const block = await getBlockWithTxsCached(blockNumber);
         if (!block) { content.innerHTML = '<div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Block not found</p></div>'; return; }
 
-        const gasPercent = block.gasUsed && block.gasLimit ? ((block.gasUsed.toNumber() / block.gasLimit.toNumber()) * 100).toFixed(2) : '-';
+        const gasPercent = block.gasUsed && block.gasLimit ? ((Number(block.gasUsed) / Number(block.gasLimit)) * 100).toFixed(2) : '-';
 
         let html = `
             <div class="detail-row"><div class="detail-label"><i class="fas fa-hashtag"></i> Block Number</div><div class="detail-value">${block.number}</div></div>
@@ -1297,8 +1848,8 @@ async function loadBlockDetail(blockNumber) {
             <div class="detail-row"><div class="detail-label"><i class="fas fa-link"></i> Hash</div><div class="detail-value">${block.hash} <button class="copy-btn" onclick="copyToClipboard('${block.hash}')"><i class="fas fa-copy"></i> Copy</button></div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-arrow-left"></i> Parent Hash</div><div class="detail-value"><span class="hash-link" onclick="navigateTo('block-detail', ${block.number - 1})">${block.parentHash}</span></div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-user"></i> Miner</div><div class="detail-value"><span class="hash-link" onclick="navigateTo('address', '${block.miner}')">${block.miner}</span> <button class="copy-btn" onclick="copyToClipboard('${block.miner}')"><i class="fas fa-copy"></i></button></div></div>
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-gas-pump"></i> Gas Used</div><div class="detail-value">${block.gasUsed ? block.gasUsed.toNumber().toLocaleString() : '-'} (${gasPercent}%)</div></div>
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-fire"></i> Gas Limit</div><div class="detail-value">${block.gasLimit ? block.gasLimit.toNumber().toLocaleString() : '-'}</div></div>
+            <div class="detail-row"><div class="detail-label"><i class="fas fa-gas-pump"></i> Gas Used</div><div class="detail-value">${block.gasUsed ? Number(block.gasUsed).toLocaleString() : '-'} (${gasPercent}%)</div></div>
+            <div class="detail-row"><div class="detail-label"><i class="fas fa-fire"></i> Gas Limit</div><div class="detail-value">${block.gasLimit ? Number(block.gasLimit).toLocaleString() : '-'}</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-file"></i> Transactions</div><div class="detail-value">${block.transactions ? block.transactions.length : 0}</div></div>
         `;
 
@@ -1315,7 +1866,7 @@ async function loadBlockDetail(blockNumber) {
                                 <div class="tx-item-icon" style="width:32px;height:32px;font-size:14px"><i class="fas fa-exchange-alt"></i></div>
                                 <div class="item-info">
                                     <div class="item-row"><span class="item-link" onclick="navigateTo('tx-detail', '${tx.hash}')">${truncateHash(tx.hash)}</span></div>
-                                    <div class="item-detail">From: <span class="hash-link" onclick="navigateTo('address', '${tx.from}')">${truncateHash(tx.from)}</span> → ${tx.to ? `<span class="hash-link" onclick="navigateTo('address', '${tx.to}')">${truncateHash(tx.to)}</span>` : 'Contract'} | ${parseFloat(ethers.utils.formatEther(tx.value)).toFixed(4)} APLO</div>
+                                    <div class="item-detail">From: <span class="hash-link" onclick="navigateTo('address', '${tx.from}')">${truncateHash(tx.from)}</span> → ${tx.to ? `<span class="hash-link" onclick="navigateTo('address', '${tx.to}')">${truncateHash(tx.to)}</span>` : 'Contract'} | ${parseFloat(ethers.utils.formatEther(tx.value)).toFixed(4)} GAPLO</div>
                                 </div>
                             </div>
                         `).join('')}
@@ -1350,8 +1901,8 @@ async function loadTxDetail(txHash) {
         let gasUsed = '-', txFee = '-', status = '-';
 
         if (receipt) {
-            gasUsed = receipt.gasUsed.toNumber().toLocaleString();
-            txFee = parseFloat(ethers.utils.formatEther(receipt.gasUsed.mul(tx.gasPrice))).toFixed(6) + ' APLO';
+            gasUsed = Number(receipt.gasUsed).toLocaleString();
+            txFee = parseFloat(ethers.utils.formatEther(receipt.gasUsed.mul(tx.gasPrice))).toFixed(6) + ' GAPLO';
             status = receipt.status === 1
                 ? '<span style="color:var(--success)"><i class="fas fa-check-circle"></i> Success</span>'
                 : '<span style="color:var(--danger)"><i class="fas fa-times-circle"></i> Failed</span>';
@@ -1371,7 +1922,7 @@ async function loadTxDetail(txHash) {
             <div class="detail-row"><div class="detail-label"><i class="fas fa-clock"></i> Timestamp</div><div class="detail-value">${timestampStr}</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-arrow-from-left"></i> From</div><div class="detail-value"><span class="hash-link" onclick="navigateTo('address', '${tx.from}')">${tx.from}</span> <button class="copy-btn" onclick="copyToClipboard('${tx.from}')"><i class="fas fa-copy"></i></button></div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-arrow-to-right"></i> To</div><div class="detail-value">${tx.to ? `<span class="hash-link" onclick="navigateTo('address', '${tx.to}')">${tx.to}</span> <button class="copy-btn" onclick="copyToClipboard('${tx.to}')"><i class="fas fa-copy"></i></button>` : '<em>Contract Creation</em>'}</div></div>
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-coins"></i> Value</div><div class="detail-value">${parseFloat(value).toFixed(6)} APLO</div></div>
+            <div class="detail-row"><div class="detail-label"><i class="fas fa-coins"></i> Value</div><div class="detail-value">${parseFloat(value).toFixed(6)} GAPLO</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-gas-pump"></i> Gas Price</div><div class="detail-value">${gasPrice} Gwei</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-fire"></i> Gas Used</div><div class="detail-value">${gasUsed}</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-dollar-sign"></i> Tx Fee</div><div class="detail-value">${txFee}</div></div>
@@ -1399,7 +1950,7 @@ async function loadTxDetail(txHash) {
                                     <div class="item-detail">
                                         <span class="hash-link" onclick="navigateTo('address', '${t.from}')">${truncateHash(t.from)}</span>
                                         → <span class="hash-link" onclick="navigateTo('address', '${t.to}')">${truncateHash(t.to)}</span>
-                                        | ${formatTokenValue(t.value)} tokens
+                                        | ${formatTokenValue(t.value, t.contractAddress)}
                                     </div>
                                 </div>
                             </div>
@@ -1424,61 +1975,210 @@ async function loadAddressDetail(address) {
     content.innerHTML = '<div class="skeleton-detail"><div class="skeleton-detail-row"></div><div class="skeleton-detail-row"></div></div>';
 
     try {
-        const [balance, txCount] = await Promise.all([
+        const [balance, txCount, aploBalance] = await Promise.all([
             getBalanceCached(address),
-            provider.getTransactionCount(address)
+            provider.getTransactionCount(address),
+            getTokenBalance(APLO_TOKEN_ADDRESS, address)
         ]);
 
+        // Summary cards
         let html = `
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-wallet"></i> Address</div><div class="detail-value">${address} <button class="copy-btn" onclick="copyToClipboard('${address}')"><i class="fas fa-copy"></i> Copy</button></div></div>
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-coins"></i> Balance</div><div class="detail-value">${parseFloat(ethers.utils.formatEther(balance)).toFixed(6)} APLO</div></div>
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-exchange-alt"></i> Transactions</div><div class="detail-value">${txCount}</div></div>
+            <div class="address-summary">
+                <div class="address-balance-card">
+                    <div class="label"><i class="fas fa-coins"></i> GAPLO Balance</div>
+                    <div class="value">${parseFloat(ethers.utils.formatEther(balance)).toFixed(6)}</div>
+                    <div class="sub">Native Coin</div>
+                </div>
+                <div class="address-balance-card">
+                    <div class="label"><i class="fas fa-coins"></i> APLO Token Balance</div>
+                    <div class="value">${parseFloat(ethers.utils.formatUnits(aploBalance, 18)).toFixed(6)}</div>
+                    <div class="sub">ERC-20 Token</div>
+                </div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label"><i class="fas fa-wallet"></i> Address</div>
+                <div class="detail-value">${address} <button class="copy-btn" onclick="copyToClipboard('${address}')"><i class="fas fa-copy"></i> Copy</button></div>
+            </div>
+            <div class="detail-row">
+                <div class="detail-label"><i class="fas fa-exchange-alt"></i> Transactions</div>
+                <div class="detail-value">${txCount}</div>
+            </div>
+        `;
+
+        // Tabs
+        html += `
+            <div class="address-tabs">
+                <button class="address-tab active" onclick="switchAddressTab('txs', this)">Transactions <span class="tab-count" id="addrTxCount">...</span></button>
+                <button class="address-tab" onclick="switchAddressTab('tokens', this)">Token Holdings <span class="tab-count" id="addrTokenCount">...</span></button>
+            </div>
+            <div class="address-tab-content active" id="addrTabTxs"></div>
+            <div class="address-tab-content" id="addrTabTokens"></div>
         `;
 
         content.innerHTML = html;
 
-        // Scan for transactions
+        // Scan for transactions - go deep with batch RPC (up to 50k blocks!)
         const latestBlock = await provider.getBlockNumber();
         const txs = [];
+        const TX_SCAN_DEPTH = Math.min(txCount + 100, 50000); // Scan up to 50k blocks!
         const blockNums = [];
-        for (let i = latestBlock; i >= Math.max(0, latestBlock - 100) && txs.length < 20; i--) blockNums.push(i);
+        for (let i = latestBlock; i >= Math.max(0, latestBlock - TX_SCAN_DEPTH); i--) blockNums.push(i);
 
-        const results = await parallelBatch(blockNums, (n) => getBlockWithTxsCached(n), 5);
-        for (const r of results) {
-            if (txs.length >= 20) break;
-            if (r.status !== 'fulfilled' || !r.value) continue;
-            const b = r.value;
+        const blocks = await fetchBlocksBatch(blockNums, true);
+        for (const b of blocks) {
+            if (txs.length >= 50) break;
+            if (!b) continue;
             if (b.transactions) {
                 for (const tx of b.transactions) {
-                    if (tx.from === address || tx.to === address) {
-                        txs.push({ ...tx, blockTimestamp: b.timestamp });
-                        if (txs.length >= 20) break;
+                    if (tx.from?.toLowerCase() === address.toLowerCase() || tx.to?.toLowerCase() === address.toLowerCase()) {
+                        txs.push({ ...tx, blockTimestamp: b.timestamp, blockNumber: b.number });
+                        if (txs.length >= 50) break;
                     }
                 }
             }
         }
 
+        // Render transactions tab
+        document.getElementById('addrTxCount').textContent = txs.length + (txs.length >= 50 ? '+' : '');
+        const txsTab = document.getElementById('addrTabTxs');
         if (txs.length > 0) {
-            content.innerHTML += `
-                <div class="detail-row">
-                    <div class="detail-label"><i class="fas fa-list"></i> Recent Transactions</div>
-                    <div class="detail-value"><div class="detail-txs">
-                        ${txs.map(tx => `
-                            <div class="tx-item">
-                                <div class="tx-item-icon" style="width:32px;height:32px;font-size:14px"><i class="fas fa-exchange-alt"></i></div>
-                                <div class="item-info">
-                                    <div class="item-row"><span class="item-link" onclick="navigateTo('tx-detail', '${tx.hash}')">${truncateHash(tx.hash)}</span><span class="item-time">${getTimeAgo(tx.blockTimestamp)}</span></div>
-                                    <div class="item-detail">${tx.from.toLowerCase() === address.toLowerCase() ? `<span style="color:var(--danger)">Out</span> → ${tx.to ? `<span class="hash-link" onclick="navigateTo('address', '${tx.to}')">${truncateHash(tx.to)}</span>` : 'Contract'}` : `<span style="color:var(--success)">In</span> ← <span class="hash-link" onclick="navigateTo('address', '${tx.from}')">${truncateHash(tx.from)}</span>`} | ${parseFloat(ethers.utils.formatEther(tx.value)).toFixed(4)} APLO</div>
-                                </div>
-                            </div>
-                        `).join('')}
-                    </div></div>
-                </div>
+            txsTab.innerHTML = `
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Tx Hash</th>
+                            <th>Block</th>
+                            <th>Age</th>
+                            <th>From</th>
+                            <th></th>
+                            <th>To</th>
+                            <th>Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${txs.map(tx => {
+                            const isOut = tx.from?.toLowerCase() === address.toLowerCase();
+                            return `<tr>
+                                <td><span class="hash-link" onclick="navigateTo('tx-detail', '${tx.hash}')">${truncateHash(tx.hash)}</span></td>
+                                <td><span class="hash-link" onclick="navigateTo('block-detail', ${tx.blockNumber || 0})">${tx.blockNumber || '-'}</span></td>
+                                <td>${getTimeAgo(tx.blockTimestamp)}</td>
+                                <td><span class="hash-link" onclick="navigateTo('address', '${tx.from}')">${truncateHash(tx.from)}</span></td>
+                                <td><span style="color:${isOut ? 'var(--danger)' : 'var(--success)'};font-weight:600;font-size:11px">${isOut ? 'OUT' : 'IN'}</span></td>
+                                <td>${tx.to ? `<span class="hash-link" onclick="navigateTo('address', '${tx.to}')">${truncateHash(tx.to)}</span>` : '<em>Contract</em>'}</td>
+                                <td>${parseFloat(ethers.utils.formatEther(tx.value || 0)).toFixed(4)} GAPLO</td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
             `;
+        } else {
+            txsTab.innerHTML = '<div class="empty-state"><i class="fas fa-inbox"></i><p>No transactions found in recent blocks</p></div>';
         }
+
+        // Token Holdings tab - use eth_getLogs for efficient ERC-20 discovery (100k+ blocks!)
+        const tokensTab = document.getElementById('addrTabTokens');
+        tokensTab.innerHTML = '<div style="padding:16px;color:var(--text-secondary)"><i class="fas fa-spinner fa-spin"></i> Scanning for tokens via eth_getLogs...</div>';
+        
+        // Use eth_getLogs to scan much deeper for ERC-20 transfers
+        const LOG_SCAN_DEPTH = Math.min(txCount + 100, 50000); // Up to 50k blocks!
+        const logFromBlock = Math.max(0, latestBlock - LOG_SCAN_DEPTH);
+        const transferLogs = await fetchLogsByAddress(address, logFromBlock, latestBlock);
+        
+        // Collect unique token contracts from Transfer events
+        const tokenContracts = new Map();
+        const addrLower = address.toLowerCase();
+        for (const log of transferLogs) {
+            if (log.topics && log.topics[0] === TRANSFER_TOPIC && log.topics.length >= 3) {
+                const contractAddr = log.address.toLowerCase();
+                if (!tokenContracts.has(contractAddr)) {
+                    tokenContracts.set(contractAddr, log.address);
+                }
+            }
+            if (tokenContracts.size >= 20) break;
+        }
+        
+        // Batch fetch balances and names for discovered tokens (2 single HTTP requests)
+        const tokenEntries = Array.from(tokenContracts.entries()).slice(0, 10);
+        const tokenAddrs = tokenEntries.map(([_, addr]) => addr);
+        const [tokenBals, tokenNames] = await Promise.all([
+            getTokenBalancesBatch(tokenAddrs, address),
+            getTokenNamesBatch(tokenAddrs)
+        ]);
+        const discoveredTokens = [];
+        for (let i = 0; i < tokenAddrs.length; i++) {
+            const contractOrig = tokenAddrs[i];
+            const bal = tokenBals[i];
+            const resolvedName = tokenNames[i];
+            if (bal && bal.gt(0)) {
+                discoveredTokens.push({
+                    address: contractOrig,
+                    balance: bal,
+                    name: resolvedName || ('Token ' + contractOrig.slice(0, 6) + '...' + contractOrig.slice(-4))
+                });
+            }
+        }
+        
+        // Render token holdings
+        let tokenCount = discoveredTokens.length + (aploBalance.gt(0) ? 1 : 0);
+        document.getElementById('addrTokenCount').textContent = tokenCount;
+        
+        let tokenHtml = '<div class="token-holdings-list">';
+        // Always show GAPLO
+        tokenHtml += `
+            <div class="token-holding-item">
+                <div class="token-holding-icon" style="background:var(--bg-tertiary);color:var(--text-secondary)"><i class="fas fa-coins"></i></div>
+                <div class="token-holding-info">
+                    <div class="token-holding-name">GAPLO</div>
+                    <div class="token-holding-address">Native Coin</div>
+                </div>
+                <div class="token-holding-balance">
+                    <div class="token-holding-amount">${parseFloat(ethers.utils.formatEther(balance)).toFixed(6)}</div>
+                    <div class="token-holding-usd">Native Balance</div>
+                </div>
+            </div>`;
+        // Show APLO if balance > 0
+        if (aploBalance.gt(0)) {
+            tokenHtml += `
+            <div class="token-holding-item">
+                <div class="token-holding-icon">AP</div>
+                <div class="token-holding-info">
+                    <div class="token-holding-name">APLO</div>
+                    <div class="token-holding-address">${APLO_TOKEN_ADDRESS}</div>
+                </div>
+                <div class="token-holding-balance">
+                    <div class="token-holding-amount">${parseFloat(ethers.utils.formatUnits(aploBalance, 18)).toFixed(6)}</div>
+                    <div class="token-holding-usd">APLO Token</div>
+                </div>
+            </div>`;
+        }
+        // Show discovered ERC-20 tokens
+        for (const t of discoveredTokens) {
+            tokenHtml += `
+            <div class="token-holding-item">
+                <div class="token-holding-icon" style="font-size:10px">${t.name.slice(0,2).toUpperCase()}</div>
+                <div class="token-holding-info">
+                    <div class="token-holding-name">${t.name}</div>
+                    <div class="token-holding-address">${t.address}</div>
+                </div>
+                <div class="token-holding-balance">
+                    <div class="token-holding-amount">${parseFloat(ethers.utils.formatUnits(t.balance, 18)).toFixed(6)}</div>
+                    <div class="token-holding-usd">ERC-20 Token</div>
+                </div>
+            </div>`;
+        }
+        tokenHtml += '</div>';
+        tokensTab.innerHTML = tokenHtml;
+
     } catch (error) {
         content.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Error: ${escapeHtml(error.message)}</p></div>`;
     }
+}
+
+function switchAddressTab(tab, btn) {
+    document.querySelectorAll('.address-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.address-tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(tab === 'txs' ? 'addrTabTxs' : 'addrTabTokens').classList.add('active');
 }
 
 // ========================================
@@ -1487,14 +2187,55 @@ async function loadAddressDetail(address) {
 let searchTimeout = null;
 function performSearch() {
     const input = document.getElementById('searchInput').value.trim();
-    if (!input) return;
+    if (!input) {
+        showToast('Please enter a search term');
+        return;
+    }
 
     if (searchTimeout) clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => {
-        if (/^\d+$/.test(input)) { navigateTo('block-detail', parseInt(input)); return; }
-        if (/^0x[a-fA-F0-9]{64}$/.test(input)) { navigateTo('tx-detail', input); return; }
-        if (/^0x[a-fA-F0-9]{40}$/.test(input)) { navigateTo('address', input); return; }
-        showToast('Invalid search. Enter a block number, tx hash, or address.');
+        // Block number (plain digits)
+        if (/^\d+$/.test(input)) {
+            const blockNum = parseInt(input);
+            if (blockNum < 0) {
+                showToast('Block number must be positive');
+                return;
+            }
+            navigateTo('block-detail', blockNum);
+            return;
+        }
+        // Transaction or Block hash (0x + 64 hex chars)
+        if (/^0x[a-fA-F0-9]{64}$/.test(input)) {
+            // Try block hash first, then fall back to tx hash
+            (async () => {
+                try {
+                    if (provider) {
+                        const block = await provider.getBlock(input).catch(() => null);
+                        if (block && block.number != null) {
+                            navigateTo('block-detail', block.number);
+                            return;
+                        }
+                    }
+                } catch(e) {}
+                navigateTo('tx-detail', input);
+            })();
+            return;
+        }
+        // Address (0x + 40 hex chars)
+        if (/^0x[a-fA-F0-9]{40}$/.test(input)) {
+            navigateTo('address', input);
+            return;
+        }
+        // Partial match hints
+        if (/^0x[a-fA-F0-9]{0,39}$/.test(input)) {
+            showToast('Address must be 40 hex characters after 0x (' + input.length - 2 + '/40)');
+        } else if (/^0x[a-fA-F0-9]{41,63}$/.test(input)) {
+            showToast('Tx hash must be 64 hex characters after 0x (' + input.length - 2 + '/64)');
+        } else if (/^0x/i.test(input)) {
+            showToast('Invalid hex format. Check for typos.');
+        } else {
+            showToast('Search by block number, tx hash (0x...), or address (0x...)');
+        }
     }, 150);
 }
 
