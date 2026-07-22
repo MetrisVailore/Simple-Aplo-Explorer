@@ -88,11 +88,32 @@ let lastRefreshTime = 0;
 let currentBlockNumber = 0;
 let previousBlockNumber = 0;
 
+// Keep the explorer responsive while still looking far enough back to find
+// activity on low-volume networks. These are deliberately separate: headers
+// are cheap, full transactions are not.
+const HISTORY = Object.freeze({
+    dashboardTransactionBlocks: 10_000,
+    dashboardTransferBlocks: 10_000,
+    transactionsBlocks: 50_000,
+    transfersBlocks: 100_000,
+    validatorsBlocks: 5_000,
+    validatorSamples: 500,
+    transferLogChunk: 250,
+    transferLogMaxChunk: 2_000,
+    transactionBlockChunk: 500,
+    dashboardItems: 25,
+    transferPageSize: 20
+});
+
 // ERC-20 Transfer event signature
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
 // APLO ERC-20 Token (special contract address)
 const APLO_TOKEN_ADDRESS = '0x0000000000000000000000000000000000001235';
+const KNOWN_TOKEN_METADATA = Object.freeze({
+    '0x0000000000000000000000000000000000001234': { name: 'GAPLO', symbol: 'Gas Aplo', decimals: 18 },
+    '0x0000000000000000000000000000000000001235': { name: 'Aplo native', symbol: 'APLO', decimals: 18 }
+});
 
 // ERC-20 balanceOf(address) function selector: 0x70a08231
 async function getTokenBalance(tokenAddress, walletAddress) {
@@ -120,23 +141,41 @@ async function getTokenBalance(tokenAddress, walletAddress) {
     }
 }
 
-// Batch fetch ERC-20 token names (single HTTP request)
-async function getTokenNamesBatch(tokenAddresses) {
-    if (!provider || tokenAddresses.length === 0) return [];
+function decodeTokenText(result) {
+    if (!result || result === '0x') return null;
+    try {
+        return ethers.utils.defaultAbiCoder.decode(['string'], result)[0].trim() || null;
+    } catch (_) {
+        try { return ethers.utils.parseBytes32String(result).trim() || null; } catch (_) { return null; }
+    }
+}
+
+const tokenMetadataCache = new LRUCache(2_000, 24 * 60 * 60 * 1000);
+
+// Resolve name, symbol, and decimals in one JSON-RPC batch. Results are keyed
+// by request id because JSON-RPC is allowed to return a batch out of order.
+async function getTokenMetadataBatch(tokenAddresses) {
+    const unique = [...new Set(tokenAddresses.filter(Boolean).map(a => a.toLowerCase()))];
+    if (!provider || unique.length === 0) return new Map();
+    const metadata = new Map();
+    const missing = [];
+    unique.forEach(address => {
+        const known = KNOWN_TOKEN_METADATA[address];
+        const cached = tokenMetadataCache.get(`token_meta_${address}`);
+        if (known || cached) metadata.set(address, known || cached);
+        else missing.push(address);
+    });
+    if (!missing.length) return metadata;
+
     const MAX_RETRIES = 2;
     const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
-    const nameData = '0x06fdde03'; // name() function selector
-    
     for (let retry = 0; retry <= MAX_RETRIES; retry++) {
         if (retry > 0) await new Promise(r => setTimeout(r, 100 * retry));
-        
-        const rpcBatch = tokenAddresses.map((tokenAddr, idx) => ({
-            jsonrpc: '2.0',
-            method: 'eth_call',
-            params: [{ to: tokenAddr, data: nameData }, 'latest'],
-            id: idx
-        }));
-        
+        const rpcBatch = missing.flatMap((tokenAddr, index) => [
+            { jsonrpc: '2.0', method: 'eth_call', params: [{ to: tokenAddr, data: '0x06fdde03' }, 'latest'], id: index * 3 },
+            { jsonrpc: '2.0', method: 'eth_call', params: [{ to: tokenAddr, data: '0x95d89b41' }, 'latest'], id: index * 3 + 1 },
+            { jsonrpc: '2.0', method: 'eth_call', params: [{ to: tokenAddr, data: '0x313ce567' }, 'latest'], id: index * 3 + 2 }
+        ]);
         try {
             const response = await fetch(rpcUrl, {
                 method: 'POST',
@@ -144,24 +183,21 @@ async function getTokenNamesBatch(tokenAddresses) {
                 body: JSON.stringify(rpcBatch)
             });
             const results = await response.json();
-            if (Array.isArray(results) && results.length === tokenAddresses.length) {
-                return results.map(res => {
-                    if (res.result && res.result !== '0x' && res.result.length > 2) {
-                        try {
-                            // Decode ABI-encoded string: skip 32-byte offset + length prefix
-                            const hex = res.result.slice(130); // Skip offset(32) + length(32) = 64 hex chars
-                            const len = parseInt(res.result.slice(66, 130), 16);
-                            const nameHex = res.result.slice(130, 130 + len * 2);
-                            let name = '';
-                            for (let i = 0; i < nameHex.length; i += 2) {
-                                const code = parseInt(nameHex.substr(i, 2), 16);
-                                if (code > 0) name += String.fromCharCode(code);
-                            }
-                            return name.trim() || null;
-                        } catch(e) { return null; }
-                    }
-                    return null;
+            if (Array.isArray(results)) {
+                const byId = new Map(results.map(result => [Number(result.id), result]));
+                missing.forEach((address, index) => {
+                    const name = decodeTokenText(byId.get(index * 3)?.result);
+                    const symbol = decodeTokenText(byId.get(index * 3 + 1)?.result);
+                    let decimals = 18;
+                    try {
+                        const value = ethers.BigNumber.from(byId.get(index * 3 + 2)?.result || '0x12').toNumber();
+                        if (value >= 0 && value <= 36) decimals = value;
+                    } catch (_) {}
+                    const entry = { name: name || symbol || `Token ${address.slice(0, 6)}…${address.slice(-4)}`, symbol: symbol || name || 'TOKEN', decimals };
+                    tokenMetadataCache.set(`token_meta_${address}`, entry);
+                    metadata.set(address, entry);
                 });
+                return metadata;
             }
         } catch (error) {
             if (retry === MAX_RETRIES) {
@@ -169,7 +205,8 @@ async function getTokenNamesBatch(tokenAddresses) {
             }
         }
     }
-    return tokenAddresses.map(() => null);
+    missing.forEach(address => metadata.set(address, { name: `Token ${address.slice(0, 6)}…${address.slice(-4)}`, symbol: 'TOKEN', decimals: 18 }));
+    return metadata;
 }
 
 // Batch fetch multiple ERC-20 token balances (single HTTP request)
@@ -197,7 +234,9 @@ async function getTokenBalancesBatch(tokenAddresses, walletAddress) {
             });
             const results = await response.json();
             if (Array.isArray(results) && results.length === tokenAddresses.length) {
-                return results.map(res => {
+                const byId = new Map(results.map(result => [Number(result.id), result]));
+                return tokenAddresses.map((_, index) => {
+                    const res = byId.get(index);
                     if (res.result && res.result !== '0x') {
                         return ethers.BigNumber.from(res.result);
                     }
@@ -239,7 +278,18 @@ const blockCache = new LRUCache(300, 60000);    // 60s TTL - longer since blocks
 const txCache = new LRUCache(500, 120000);      // 120s TTL
 const balanceCache = new LRUCache(200, 30000);  // 30s TTL
 const statsCache = new LRUCache(10, 15000);
+const viewCache = new LRUCache(80, 30000);      // Short-lived rendered-data snapshots
 const deduplicator = new RequestDeduplicator();
+
+async function getCachedView(key, loader, ttl = 30000) {
+    const cached = viewCache.get(key);
+    if (cached) return cached;
+    return deduplicator.dedupe(`view_${key}`, async () => {
+        const fresh = await loader();
+        viewCache.set(key, fresh, ttl);
+        return fresh;
+    });
+}
 
 // Chart data arrays
 let blockTimeData = [];
@@ -247,11 +297,17 @@ let difficultyData = [];
 let gasPriceData = [];
 let gasUsageData = [];
 let gasPriceHistory = [];
+const DEFAULT_CHART_BLOCKS = 21;
+const chartTimeframes = { blockTime: DEFAULT_CHART_BLOCKS, difficulty: DEFAULT_CHART_BLOCKS, gasPrice: DEFAULT_CHART_BLOCKS, gasUsage: DEFAULT_CHART_BLOCKS };
+const chartRequestVersions = { blockTime: 0, difficulty: 0, gasPrice: 0, gasUsage: 0 };
+const MAX_CHART_SAMPLES = 480;
 
 
 
 // Chart hover state per canvas
 let chartStates = {};
+let chartResizeObserver = null;
+let chartResizeFrame = null;
 
 // Shared chart configurations (single source of truth)
 const CHARTS = [
@@ -353,10 +409,62 @@ async function parallelBatch(items, fn, concurrency = 10) {
 // JSON-RPC Batch Fetching (Single HTTP Request)
 // ========================================
 const blockBatchCache = new Map(); // Simple in-memory cache for batch results
-const MAX_CACHE_SIZE = 500;
+const MAX_CACHE_SIZE = 4_096;
+const blockWithTransactionsBatchCache = new LRUCache(2_000, 120000);
+const PERSISTED_CACHE_KEY = 'aplo-explorer-test-cache-v1';
+const PERSISTED_CACHE_TTL = 15 * 60 * 1000;
+
+function restorePersistentCaches() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(PERSISTED_CACHE_KEY) || 'null');
+        if (!saved || saved.expiresAt <= Date.now()) return;
+        (saved.blocks || []).forEach(([key, value]) => blockBatchCache.set(key, value));
+        (saved.transactionBlocks || []).forEach(([key, value]) => blockWithTransactionsBatchCache.set(key, value, PERSISTED_CACHE_TTL));
+        (saved.tokenMetadata || []).forEach(([key, value]) => tokenMetadataCache.set(key, value, PERSISTED_CACHE_TTL));
+    } catch (error) {
+        console.warn('Persistent cache restore skipped:', error);
+    }
+}
+
+function persistCaches() {
+    try {
+        // Keep the browser cache compact: immutable headers cover the common
+        // refresh path; only a small recent set of full blocks is retained.
+        const payload = {
+            expiresAt: Date.now() + PERSISTED_CACHE_TTL,
+            blocks: Array.from(blockBatchCache.entries()).slice(-1_200),
+            transactionBlocks: Array.from(blockWithTransactionsBatchCache.cache.entries()).slice(-200).map(([key, entry]) => [key, entry.value]),
+            tokenMetadata: Array.from(tokenMetadataCache.cache.entries()).slice(-300).map(([key, entry]) => [key, entry.value])
+        };
+        localStorage.setItem(PERSISTED_CACHE_KEY, JSON.stringify(payload));
+    } catch (error) {
+        // Quota failures must never block the live explorer.
+        console.warn('Persistent cache save skipped:', error);
+    }
+}
 
 async function fetchBlocksBatch(blockNumbers, includeTransactions = false, onProgress = null) {
     if (!provider || blockNumbers.length === 0) return [];
+
+    if (includeTransactions) {
+        const cached = [];
+        const toFetch = [];
+        for (const number of blockNumbers) {
+            const block = blockWithTransactionsBatchCache.get(`block_txs_${number}`);
+            cached.push(block);
+            if (!block) toFetch.push(number);
+        }
+        if (toFetch.length === 0) return cached;
+
+        const fetched = await fetchBlocksBatchRaw(toFetch, true, onProgress);
+        let fetchedIndex = 0;
+        return cached.map(block => {
+            if (block) return block;
+            const fetchedBlock = fetched[fetchedIndex++];
+            if (fetchedBlock) blockWithTransactionsBatchCache.set(`block_txs_${fetchedBlock.number}`, fetchedBlock);
+            return fetchedBlock;
+        });
+    }
     
     // Check cache first (only for non-transaction requests)
     if (!includeTransactions) {
@@ -403,23 +511,19 @@ if (block) {
 }
 
 async function fetchBlocksBatchRaw(blockNumbers, includeTransactions = false, onProgress = null) {
-    const BATCH_SIZE = Math.max(50, Math.ceil(blockNumbers.length / 5)); // Aim for ~5 requests
+    const BATCH_SIZE = 250;
     const MAX_RETRIES = 2;
-    const allBlocks = [];
     const totalBlocks = blockNumbers.length;
-    
-    for (let i = 0; i < blockNumbers.length; i += BATCH_SIZE) {
-        const batch = blockNumbers.slice(i, i + BATCH_SIZE);
+
+    const batches = [];
+    for (let index = 0; index < blockNumbers.length; index += BATCH_SIZE) {
+        batches.push(blockNumbers.slice(index, index + BATCH_SIZE));
+    }
+    let completed = 0;
+    const settledBatches = await parallelBatch(batches, async batch => {
         let batchResults = null;
-        
-        // Report progress
-        if (onProgress) {
-            onProgress(Math.min(i + BATCH_SIZE, totalBlocks), totalBlocks);
-        }
-        
         for (let retry = 0; retry <= MAX_RETRIES && !batchResults; retry++) {
             if (retry > 0) await new Promise(r => setTimeout(r, 100 * retry));
-            
             const rpcBatch = batch.map((num, idx) => ({
                 jsonrpc: '2.0',
                 method: 'eth_getBlockByNumber',
@@ -437,7 +541,9 @@ async function fetchBlocksBatchRaw(blockNumbers, includeTransactions = false, on
                 const results = await response.json();
                 
                 if (Array.isArray(results)) {
-                    batchResults = results.map(res => {
+                    const byId = new Map(results.map(result => [Number(result.id), result]));
+                    batchResults = batch.map((_, index) => {
+                        const res = byId.get(index) || {};
                         if (res.result) {
                             return {
                                 number: parseInt(res.result.number, 16),
@@ -459,22 +565,50 @@ async function fetchBlocksBatchRaw(blockNumbers, includeTransactions = false, on
                 }
             }
         }
-        
-        // Add results (either successful or nulls from failed batch)
-        if (batchResults) {
-            allBlocks.push(...batchResults);
-        } else {
-            batch.forEach(() => allBlocks.push(null));
+        completed += batch.length;
+        if (onProgress) onProgress(completed, totalBlocks);
+        return batchResults || batch.map(() => null);
+    }, includeTransactions ? 4 : 6);
+
+    return settledBatches.flatMap(result => result.status === 'fulfilled' ? result.value : []);
+}
+
+// Search transaction-bearing blocks progressively. On this chain most blocks
+// are empty, so stopping as soon as a page is full avoids paying to hydrate an
+// entire historical range on every page load.
+async function findRecentTransactions(latestBlock, wanted, maxBlocks, matches = null) {
+    const results = [];
+    const earliest = Math.max(0, latestBlock - maxBlocks + 1);
+    let toBlock = latestBlock;
+
+    while (toBlock >= earliest && results.length < wanted) {
+        const fromBlock = Math.max(earliest, toBlock - HISTORY.transactionBlockChunk + 1);
+        const blockNumbers = [];
+        for (let block = toBlock; block >= fromBlock; block--) blockNumbers.push(block);
+        // Headers contain only transaction hashes. Full transaction objects
+        // are fetched only for the few blocks that are not empty.
+        const headers = await fetchBlocksBatch(blockNumbers, false);
+        const candidateNumbers = headers.filter(block => block?.transactions?.length).map(block => block.number);
+        const blocks = candidateNumbers.length ? await fetchBlocksBatch(candidateNumbers, true) : [];
+        for (const block of blocks) {
+            if (!block?.transactions?.length) continue;
+            for (const transaction of block.transactions.slice().reverse()) {
+                if (!matches || matches(transaction)) {
+                    results.push({ ...transaction, blockNumber: block.number, blockTimestamp: block.timestamp });
+                    if (results.length >= wanted) break;
+                }
+            }
+            if (results.length >= wanted) break;
         }
+        toBlock = fromBlock - 1;
     }
-    
-    return allBlocks;
+    return results;
 }
 
 // Batch fetch transaction receipts (single HTTP request)
 async function fetchReceiptsBatch(txHashes) {
     if (!provider || txHashes.length === 0) return [];
-    const BATCH_SIZE = Math.max(50, Math.ceil(txHashes.length / 5)); // Aim for ~5 requests
+    const BATCH_SIZE = Math.min(250, Math.max(50, Math.ceil(txHashes.length / 8)));
     const MAX_RETRIES = 2;
     const allReceipts = [];
     const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
@@ -501,7 +635,8 @@ async function fetchReceiptsBatch(txHashes) {
                 });
                 const results = await response.json();
                 if (Array.isArray(results)) {
-                    batchResults = results.map(res => res.result || null);
+                    const byId = new Map(results.map(result => [Number(result.id), result]));
+                    batchResults = batch.map((_, index) => byId.get(index)?.result || null);
                 }
             } catch (error) {
                 if (retry === MAX_RETRIES) {
@@ -579,6 +714,102 @@ async function fetchLogsByAddress(address, fromBlock, toBlock) {
     return [];
 }
 
+// Fetch Transfer logs directly instead of reading every transaction receipt.
+// This is substantially cheaper and also finds transfers in otherwise quiet
+// blocks, which the old receipt scan skipped.
+async function fetchTransferLogs(fromBlock, toBlock) {
+    if (!provider || fromBlock > toBlock) return [];
+    const rpcUrl = provider?.connection?.url || 'https://pub1.aplocoin.com';
+    const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'eth_getLogs',
+            params: [{
+                fromBlock: '0x' + fromBlock.toString(16),
+                toBlock: '0x' + toBlock.toString(16),
+                topics: [TRANSFER_TOPIC]
+            }],
+            id: 1
+        })
+    });
+    if (!response.ok) throw new Error(`eth_getLogs failed (${response.status})`);
+    const result = await response.json();
+    if (result.error) throw new Error(result.error.message || 'eth_getLogs failed');
+    return Array.isArray(result.result) ? result.result : [];
+}
+
+async function fetchTransferLogsResilient(fromBlock, toBlock) {
+    try {
+        return await fetchTransferLogs(fromBlock, toBlock);
+    } catch (error) {
+        // Some nodes enforce a result cap. Split only the failed range so the
+        // normal case remains one request per chunk.
+        if (fromBlock >= toBlock) {
+            console.warn(`Transfer scan failed for block ${fromBlock}:`, error);
+            return [];
+        }
+        const midpoint = Math.floor((fromBlock + toBlock) / 2);
+        const [older, newer] = await Promise.all([
+            fetchTransferLogsResilient(fromBlock, midpoint),
+            fetchTransferLogsResilient(midpoint + 1, toBlock)
+        ]);
+        return older.concat(newer);
+    }
+}
+
+async function findRecentTransfers(latestBlock, wanted, maxBlocks) {
+    const earliest = Math.max(0, latestBlock - maxBlocks + 1);
+    const transfers = [];
+    let toBlock = latestBlock;
+    let chunkSize = HISTORY.transferLogChunk;
+
+    while (toBlock >= earliest && transfers.length < wanted) {
+        const fromBlock = Math.max(earliest, toBlock - chunkSize + 1);
+        const logs = await fetchTransferLogsResilient(fromBlock, toBlock);
+        for (const log of logs) {
+            const transfer = parseTransferLog(log);
+            if (transfer) transfers.push(transfer);
+        }
+        chunkSize = logs.length ? HISTORY.transferLogChunk : Math.min(HISTORY.transferLogMaxChunk, chunkSize * 2);
+        toBlock = fromBlock - 1;
+    }
+
+    return transfers.sort((a, b) => {
+        const blockDiff = b.blockNumber - a.blockNumber;
+        if (blockDiff) return blockDiff;
+        return Number.parseInt(b.logIndex || '0x0', 16) - Number.parseInt(a.logIndex || '0x0', 16);
+    }).slice(0, wanted);
+}
+
+async function addTransferMetadata(transfers) {
+    const metadata = await getTokenMetadataBatch(transfers.map(transfer => transfer.contractAddress));
+    return transfers.map(transfer => ({
+        ...transfer,
+        token: metadata.get(transfer.contractAddress.toLowerCase())
+    }));
+}
+
+async function addTransferTimestamps(transfers) {
+    const blockNumbers = [...new Set(transfers.map(t => t.blockNumber))];
+    if (!blockNumbers.length) return transfers;
+    const blocks = await fetchBlocksBatch(blockNumbers, false);
+    const timestamps = new Map(blocks.filter(Boolean).map(block => [block.number, block.timestamp]));
+    return transfers.map(transfer => ({ ...transfer, blockTimestamp: timestamps.get(transfer.blockNumber) }));
+}
+
+function buildEvenlySpacedBlockNumbers(latestBlock, span, samples) {
+    const count = Math.min(span, samples);
+    if (count <= 1) return [latestBlock];
+    const numbers = [];
+    const maxOffset = span - 1;
+    for (let index = 0; index < count; index++) {
+        numbers.push(latestBlock - Math.round((index * maxOffset) / (count - 1)));
+    }
+    return [...new Set(numbers)].filter(number => number >= 0);
+}
+
 // ========================================
 // Theme Management
 // ========================================
@@ -610,8 +841,46 @@ function updateThemeIcon(theme) {
 // ========================================
 // Initialize
 // ========================================
+function getRouteState() {
+    const params = new URLSearchParams(window.location.search);
+    const page = params.get('page') || 'dashboard';
+    const allowedPages = new Set(['dashboard', 'blocks', 'transactions', 'token-transfers', 'validators', 'block-detail', 'tx-detail', 'address']);
+    return {
+        page: allowedPages.has(page) ? page : 'dashboard',
+        data: params.get('id') || undefined,
+        blocksPage: Math.max(1, Number.parseInt(params.get('blocksPage'), 10) || 1),
+        txsPage: Math.max(1, Number.parseInt(params.get('txsPage'), 10) || 1),
+        tokenTransfersPage: Math.max(1, Number.parseInt(params.get('tokenTransfersPage'), 10) || 1)
+    };
+}
+
+function syncRouteState(mode = 'replace') {
+    const params = new URLSearchParams();
+    if (currentPage !== 'dashboard') params.set('page', currentPage);
+    if (currentPage === 'blocks' && blocksPage > 1) params.set('blocksPage', blocksPage);
+    if (currentPage === 'transactions' && txsPage > 1) params.set('txsPage', txsPage);
+    if (currentPage === 'token-transfers' && tokenTransfersPage > 1) params.set('tokenTransfersPage', tokenTransfersPage);
+    if (['block-detail', 'tx-detail', 'address'].includes(currentPage) && window.__routeData) params.set('id', window.__routeData);
+
+    const query = params.toString();
+    const url = `${window.location.pathname}${query ? '?' + query : ''}`;
+    history[mode === 'push' ? 'pushState' : 'replaceState']({ page: currentPage }, '', url);
+}
+
+function restoreRouteFromUrl() {
+    const route = getRouteState();
+    currentPage = route.page;
+    window.__routeData = route.data;
+    blocksPage = route.blocksPage;
+    txsPage = route.txsPage;
+    tokenTransfersPage = route.tokenTransfersPage;
+}
+
 async function init() {
     initTheme();
+    restorePersistentCaches();
+    const initialRoute = getRouteState();
+    if (initialRoute.page !== 'dashboard') document.querySelector('.hero')?.classList.add('page-hidden');
 
     try {
         provider = new ethers.providers.JsonRpcProvider('https://pub1.aplocoin.com');
@@ -620,11 +889,13 @@ async function init() {
         previousBlockNumber = blockNumber;
         updateConnectionStatus(true, 'Connected');
 
-        // Start loading
-        loadDashboard();
+        // Restore a shareable/refresh-safe route before loading data.
+        restoreRouteFromUrl();
+        navigateTo(currentPage, window.__routeData, { replaceHistory: true, scroll: false });
         startLiveUpdates();
         startBackgroundPreloader();
         initTimeframeHandlers();
+        initChartResizeObserver();
 
         // Auto-refresh dashboard
         setInterval(() => {
@@ -735,7 +1006,7 @@ function updateCacheStats() {
 // Navigation
 // ========================================
 let navTimeout = null;
-function navigateTo(page, data) {
+function navigateTo(page, data, options = {}) {
     if (navTimeout) return;
     navTimeout = setTimeout(() => { navTimeout = null; }, 80);
 
@@ -754,6 +1025,10 @@ function navigateTo(page, data) {
 
     document.getElementById('mainNav').classList.remove('mobile-open');
     currentPage = page;
+    const hero = document.querySelector('.hero');
+    if (hero) hero.classList.toggle('page-hidden', page !== 'dashboard');
+    window.__routeData = data;
+    syncRouteState(options.replaceHistory ? 'replace' : 'push');
 
     // Update breadcrumb
     const bc = document.getElementById('breadcrumbBar');
@@ -784,8 +1059,14 @@ function navigateTo(page, data) {
         case 'address': loadAddressDetail(data); break;
     }
 
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (options.scroll !== false) window.scrollTo({ top: 0, behavior: 'smooth' });
 }
+
+window.addEventListener('popstate', () => {
+    if (!provider) return;
+    restoreRouteFromUrl();
+    navigateTo(currentPage, window.__routeData, { replaceHistory: true });
+});
 
 function toggleMobileMenu() {
     document.getElementById('mainNav').classList.toggle('mobile-open');
@@ -809,6 +1090,18 @@ async function loadDashboard() {
             provider.send('net_peerCount', []).catch(() => '0x0')
         ]);
 
+        // Keep independent dashboard sections off the critical path. The
+        // transaction scan and log query start together while headers/charts
+        // are being rendered, instead of making the page wait for each one.
+        const recentTransactionsPromise = findRecentTransactions(
+            blockNumber,
+            HISTORY.dashboardItems + 1,
+            HISTORY.dashboardTransactionBlocks
+        );
+        loadRecentTokenTransfers(blockNumber).catch(error => {
+            console.warn('Recent token transfers failed:', error);
+        });
+
         currentBlockNumber = blockNumber;
 
         // Update hero stats
@@ -825,7 +1118,7 @@ async function loadDashboard() {
 
         // Fetch blocks for stats and chart using batch RPC (single HTTP request)
         const blockNums = [];
-        for (let i = 0; i < 30; i++) {
+        for (let i = 0; i <= DEFAULT_CHART_BLOCKS; i++) {
             blockNums.push(blockNumber - i);
         }
         const blocks = (await fetchBlocksBatch(blockNums, false)).filter(b => b !== null);
@@ -841,9 +1134,13 @@ async function loadDashboard() {
         updateNetworkHealth(avgTime, parseInt(peerCount, 16));
 
         // Build chart data arrays and stats (only if we have blocks)
-        blockTimeData = [];
-        difficultyData = [];
-        gasUsageData = [];
+        const refreshBlockTime = chartTimeframes.blockTime === DEFAULT_CHART_BLOCKS;
+        const refreshDifficulty = chartTimeframes.difficulty === DEFAULT_CHART_BLOCKS;
+        const refreshGasPrice = chartTimeframes.gasPrice === DEFAULT_CHART_BLOCKS;
+        const refreshGasUsage = chartTimeframes.gasUsage === DEFAULT_CHART_BLOCKS;
+        if (refreshBlockTime) blockTimeData = [];
+        if (refreshDifficulty) difficultyData = [];
+        if (refreshGasUsage) gasUsageData = [];
 
         if (blocks.length > 0) {
             // Difficulty & Hashrate
@@ -853,44 +1150,44 @@ async function loadDashboard() {
                 document.getElementById('networkHashrate').textContent = formatHashrate(diff, avgTime);
             }
             for (let i = 0; i < blocks.length - 1; i++) {
-                blockTimeData.push({ block: blocks[i].number, value: blocks[i].timestamp - blocks[i + 1].timestamp });
-                difficultyData.push({ block: blocks[i].number, value: Number(blocks[i].difficulty) || 0 });
+                if (refreshBlockTime) blockTimeData.push({ block: blocks[i].number, value: blocks[i].timestamp - blocks[i + 1].timestamp });
+                if (refreshDifficulty) difficultyData.push({ block: blocks[i].number, value: Number(blocks[i].difficulty) || 0 });
                 const gu = blocks[i].gasUsed, gl = blocks[i].gasLimit;
-                if (gu && gl && Number(gl) > 0) {
+                if (refreshGasUsage && gu != null && gl != null && Number(gl) > 0) {
                     gasUsageData.push({ block: blocks[i].number, value: (Number(gu) / Number(gl)) * 100 });
                 }
             }
-            blockTimeData.reverse();
-            difficultyData.reverse();
-            gasUsageData.reverse();
+            if (refreshBlockTime) blockTimeData.reverse();
+            if (refreshDifficulty) difficultyData.reverse();
+            if (refreshGasUsage) gasUsageData.reverse();
 
             // Gas price from block headers (baseFeePerGas) or fallback to current gas price
-            gasPriceHistory = [];
+            if (refreshGasPrice) gasPriceHistory = [];
             let hasBaseFee = false;
             for (const block of blocks) {
                 if (block.baseFeePerGas != null) {
                     hasBaseFee = true;
-                    gasPriceHistory.push({ block: block.number, value: parseFloat(ethers.utils.formatUnits(block.baseFeePerGas, 'gwei')) });
+                    if (refreshGasPrice) gasPriceHistory.push({ block: block.number, value: parseFloat(ethers.utils.formatUnits(block.baseFeePerGas, 'gwei')) });
                 }
             }
             if (!hasBaseFee) {
                 // Fallback: use current gas price for all blocks if chain has no baseFeePerGas
                 const gpVal = parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei'));
                 for (const block of blocks) {
-                    gasPriceHistory.push({ block: block.number, value: gpVal });
+                    if (refreshGasPrice) gasPriceHistory.push({ block: block.number, value: gpVal });
                 }
             }
-            gasPriceData = gasPriceHistory.slice().reverse();
+            if (refreshGasPrice) gasPriceData = gasPriceHistory.slice().reverse();
 
             // Render all charts
             renderAllCharts();
 
             // Chart badges
-            document.getElementById('chartAvgBadge').textContent = 'Avg: ' + avgTime.toFixed(1) + 's';
-            document.getElementById('chartDiffBadge').textContent = 'Latest: ' + formatLargeNumber(difficultyData[0]?.value || 0);
-            document.getElementById('chartGasBadge').textContent = 'Current: ' + parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei')).toFixed(2) + ' Gwei';
+            if (refreshBlockTime) document.getElementById('chartAvgBadge').textContent = 'Avg: ' + avgTime.toFixed(1) + 's';
+            if (refreshDifficulty) document.getElementById('chartDiffBadge').textContent = 'Latest: ' + formatLargeNumber(difficultyData[0]?.value || 0);
+            if (refreshGasPrice) document.getElementById('chartGasBadge').textContent = 'Current: ' + parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei')).toFixed(2) + ' Gwei';
             const avgGasUsage = gasUsageData.length > 0 ? gasUsageData.reduce((s, d) => s + d.value, 0) / gasUsageData.length : 0;
-            document.getElementById('chartGasUsageBadge').textContent = 'Avg: ' + avgGasUsage.toFixed(1) + '%';
+            if (refreshGasUsage) document.getElementById('chartGasUsageBadge').textContent = 'Avg: ' + avgGasUsage.toFixed(1) + '%';
         }
 
         // Unique miners for validators preview
@@ -906,39 +1203,18 @@ async function loadDashboard() {
         const blocksHtml = blocks.slice(0, 10).map(b => createBlockItemHtml(b));
         document.getElementById('latestBlocks').innerHTML = blocksHtml.join('');
 
-        // Load latest transactions from 10 blocks for more coverage
+        // Scan a wider recent range so quiet blocks do not make the dashboard
+        // look stale. Batched RPC keeps this to a handful of HTTP requests.
         // Fetch transaction blocks using batch RPC (single HTTP request)
-        const txBlockNums = [];
-        for (let i = 0; i < 10; i++) {
-            txBlockNums.push(blockNumber - i);
-        }
-        const txBlocks = (await fetchBlocksBatch(txBlockNums, true)).filter(b => b !== null);
-
-        const txsHtml = [];
-        let txCount = 0;
-        for (const block of txBlocks) {
-            if (txCount >= 25) break;
-            if (block.transactions) {
-                // Show all transactions from each block (newest first)
-                const txs = block.transactions.slice().reverse();
-                for (const tx of txs) {
-                    if (txCount >= 25) break;
-                    txsHtml.push(createTxItemHtml(tx, block.timestamp));
-                    txCount++;
-                }
-            }
-        }
+        const recentTransactions = await recentTransactionsPromise;
+        const txsHtml = recentTransactions.slice(0, HISTORY.dashboardItems).map(tx => createTxItemHtml(tx, tx.blockTimestamp));
         document.getElementById('latestTransactions').innerHTML =
             txsHtml.length > 0 ? txsHtml.join('') : '<div class="empty-state"><i class="fas fa-inbox"></i><p>No transactions in recent blocks</p><p class="sub">Try the <a href="#" onclick="navigateTo(\'transactions\')">Transactions page</a> for older data</p></div>';
 
         // Update hero tx count
-        let totalTxs = 0;
-        txBlocks.forEach(b => { if (b.transactions) totalTxs += b.transactions.length; });
-        const avgTxsPerBlock = txBlocks.length > 0 ? totalTxs / txBlocks.length : 1;
-        document.getElementById('heroTxs').textContent = '~' + (blockNumber * Math.max(avgTxsPerBlock, 1)).toLocaleString(undefined, {maximumFractionDigits: 0});
-
-        // Load token transfers from recent blocks
-        loadRecentTokenTransfers(txBlocks);
+        document.getElementById('heroTxs').textContent = recentTransactions.length > HISTORY.dashboardItems
+            ? `${HISTORY.dashboardItems}+`
+            : recentTransactions.length.toLocaleString();
 
     } catch (error) {
         console.error('Dashboard error:', error);
@@ -1031,19 +1307,23 @@ function drawInteractiveChart(canvasId, data, opts) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = 200 * dpr;
-    canvas.style.width = rect.width + 'px';
-    canvas.style.height = '200px';
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = 200;
-    const padding = { top: 16, right: 16, bottom: 28, left: 56 };
+    const w = Math.floor(rect.width);
+    if (w < 180) return;
+    const h = Math.max(180, Math.min(240, Math.round(w * 0.42)));
+    const padding = { top: 16, right: 16, bottom: 30, left: w < 360 ? 46 : 56 };
     const chartW = w - padding.left - padding.right;
     const chartH = h - padding.top - padding.bottom;
+    if (chartW <= 0 || chartH <= 0) return;
+
+    // Setting width/height resets the canvas context, preventing transform
+    // accumulation and keeping the backing store in sync with CSS pixels.
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.width = '100%';
+    canvas.style.height = `${h}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const textColor = isDark ? '#94a3b8' : '#64748b';
@@ -1055,12 +1335,21 @@ function drawInteractiveChart(canvasId, data, opts) {
             ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#999';
             ctx.font = '13px Inter, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText('No data available', canvas.width / 2, canvas.height / 2);
+            ctx.fillText('No data available', w / 2, h / 2);
             return;
         }
-        const maxVal = (Math.max(...values) || 1) * 1.15;
-        const minVal = (Math.min(...values) || 0) * 0.85;
-        const range = maxVal - minVal || 1;
+        let maxVal = Math.max(...values);
+        let minVal = Math.min(...values);
+        if (maxVal === minVal) {
+            const paddingValue = Math.max(Math.abs(maxVal) * 0.15, 1);
+            minVal -= paddingValue;
+            maxVal += paddingValue;
+        } else {
+            const paddingValue = (maxVal - minVal) * 0.08;
+            minVal -= paddingValue;
+            maxVal += paddingValue;
+        }
+        const range = maxVal - minVal;
     const stepX = chartW / (data.length - 1);
 
     // Init hover state
@@ -1077,6 +1366,10 @@ function drawInteractiveChart(canvasId, data, opts) {
 
     function render(hoverIdx) {
         ctx.clearRect(0, 0, w, h);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        ctx.clip();
 
         // Grid lines (4 horizontal)
         ctx.strokeStyle = gridColor;
@@ -1161,10 +1454,14 @@ data.forEach((d, i) => {
             ctx.fill();
 
             // Tooltip
-            const tooltipText = opts.tooltipFn(d);
+            let tooltipText = opts.tooltipFn(d);
             ctx.font = '11px Inter, sans-serif';
+            const maxTextWidth = Math.max(40, chartW - 14);
+            while (tooltipText.length > 1 && ctx.measureText(tooltipText).width > maxTextWidth) {
+                tooltipText = tooltipText.slice(0, -2) + '…';
+            }
             const textW = ctx.measureText(tooltipText).width;
-            const tw = textW + 14;
+            const tw = Math.min(textW + 14, Math.max(80, chartW));
             const th = 26;
             const r = 5;
             let tooltipX = Math.min(Math.max(x - tw / 2, padding.left), w - padding.right - tw);
@@ -1201,9 +1498,11 @@ data.forEach((d, i) => {
         data.forEach((d, i) => {
             if (i % xLabelInterval === 0 || i === data.length - 1) {
                 const x = padding.left + i * stepX;
+                ctx.textAlign = i === 0 ? 'left' : i === data.length - 1 ? 'right' : 'center';
                 ctx.fillText('#' + d.block, x, h - 6);
             }
         });
+        ctx.restore();
     }
 
     render(state.hoverIdx);
@@ -1239,6 +1538,19 @@ data.forEach((d, i) => {
         canvas.style.cursor = 'default';
         render(-1);
     };
+}
+
+function initChartResizeObserver() {
+    if (!('ResizeObserver' in window)) return;
+    chartResizeObserver?.disconnect();
+    chartResizeObserver = new ResizeObserver(() => {
+        if (currentPage !== 'dashboard' || chartResizeFrame) return;
+        chartResizeFrame = requestAnimationFrame(() => {
+            chartResizeFrame = null;
+            renderAllCharts();
+        });
+    });
+    document.querySelectorAll('.chart-body').forEach(body => chartResizeObserver.observe(body));
 }
 
 // ========================================
@@ -1306,43 +1618,39 @@ function parseTransferLog(log) {
         const value = ethers.BigNumber.from(log.data);
         const contractAddress = log.address;
 
-        return { from, to, value, contractAddress, txHash: log.transactionHash, blockNumber: log.blockNumber };
+        return {
+            from,
+            to,
+            value,
+            contractAddress,
+            txHash: log.transactionHash,
+            blockNumber: typeof log.blockNumber === 'string' ? parseInt(log.blockNumber, 16) : log.blockNumber,
+            logIndex: log.logIndex
+        };
     } catch (e) {
         return null;
     }
 }
 
-async function loadRecentTokenTransfers(blocks) {
+async function loadRecentTokenTransfers(latestBlock) {
     const container = document.getElementById('latestTokenTransfers');
     if (!container) return;
-
-    const transfers = [];
-
-    for (const block of blocks.slice(0, 3)) {
-        if (!block.transactions) continue;
-        for (const tx of block.transactions.slice(0, 20)) {
-            try {
-                const receipt = await getReceiptCached(tx.hash);
-                if (receipt && receipt.logs) {
-                    for (const log of receipt.logs) {
-                        const transfer = parseTransferLog(log);
-                        if (transfer) {
-                            transfer.blockTimestamp = block.timestamp;
-                            transfers.push(transfer);
-                            if (transfers.length >= 10) break;
-                        }
-                    }
-                }
-            } catch (e) {}
-            if (transfers.length >= 10) break;
-        }
-        if (transfers.length >= 10) break;
-    }
+    const transfers = await findRecentTransfers(
+        latestBlock,
+        10,
+        HISTORY.dashboardTransferBlocks
+    );
+    const [transfersWithTimes, transfersWithMetadata] = await Promise.all([
+        addTransferTimestamps(transfers),
+        addTransferMetadata(transfers)
+    ]);
+    const renderedTransfers = transfersWithTimes.map((transfer, index) => ({ ...transfer, token: transfersWithMetadata[index].token }));
 
     if (transfers.length === 0) {
         container.innerHTML = '<div class="empty-state"><i class="fas fa-coins"></i><p>No ERC-20 token transfers found in recent blocks</p></div>';
         return;
-    }        container.innerHTML = transfers.map(t => `
+    }
+    container.innerHTML = renderedTransfers.map(t => `
         <div class="token-transfer-item">
             <div class="token-item-icon"><i class="fas fa-coins"></i></div>
             <div class="item-info">
@@ -1356,30 +1664,33 @@ async function loadRecentTokenTransfers(blocks) {
                 </div>
             </div>
             <div class="item-right">
-                <div class="value">${formatTokenValue(t.value, t.contractAddress)}</div>
-                <div class="sub"><span class="hash-link" onclick="navigateTo('address', '${t.contractAddress}')">${truncateHash(t.contractAddress)}</span></div>
+                <div class="value">${formatTokenValue(t.value, t.token)}</div>
+                <div class="sub">${escapeHtml(t.token?.symbol || truncateHash(t.contractAddress))}</div>
             </div>
         </div>
     `).join('');
 }
 
-function formatTokenValue(value, contractAddress = '') {
+function formatTokenValue(value, token = null) {
     try {
-        const isAPLOToken = contractAddress && contractAddress.toLowerCase() === APLO_TOKEN_ADDRESS.toLowerCase();
-        const symbol = isAPLOToken ? 'APLO' : 'tokens';
-        const str = value.toString();
-        let formatted;
-        if (str.length > 18) {
-            const intPart = str.slice(0, str.length - 18);
-            const decPart = str.slice(str.length - 18, str.length - 14);
-            formatted = intPart + '.' + decPart;
-        } else {
-            formatted = '0.' + str.padStart(18, '0').slice(0, 4);
-        }
-        return formatted + ' ' + symbol;
+        const decimals = token?.decimals ?? 18;
+        const symbol = token?.symbol || 'TOKEN';
+        const raw = ethers.BigNumber.from(value);
+        const formatted = ethers.utils.formatUnits(raw, decimals);
+        const numeric = Number(formatted);
+        const display = Number.isFinite(numeric)
+            ? numeric.toLocaleString(undefined, { maximumFractionDigits: 6 })
+            : formatted;
+        return `${display} ${escapeHtml(symbol)}`;
     } catch (e) {
-        return value.toString() + ' tokens';
+        return `${value.toString()} ${escapeHtml(token?.symbol || 'TOKEN')}`;
     }
+}
+
+function formatGasUsage(gasUsed, gasLimit) {
+    if (gasUsed == null || !gasLimit || Number(gasLimit) <= 0) return '-';
+    const percent = (Number(gasUsed) / Number(gasLimit)) * 100;
+    return `${Number(gasUsed).toLocaleString()} / ${Number(gasLimit).toLocaleString()} (${percent.toFixed(2)}%)`;
 }
 
 // ========================================
@@ -1391,39 +1702,17 @@ async function loadTokenTransfers() {
 
     try {
         const latestBlock = await provider.getBlockNumber();
-        const transfers = [];
-
-        // Scan blocks for token transfers - batch receipts for speed
-        const blockNumbers = [];
-        for (let i = latestBlock; i >= Math.max(0, latestBlock - 100) && blockNumbers.length < 30; i--) {
-            blockNumbers.push(i);
-        }
-        const blockResults = await fetchBlocksBatch(blockNumbers, true);
-
-        for (const r of blockResults) {
-            if (transfers.length >= tokenTransfersPage * 20) break;
-            if (!r || !r.transactions) continue;
-            const txs = r.transactions;
-
-            // Batch fetch all receipts for this block
-            const receiptResults = await parallelBatch(
-                txs.map(tx => tx.hash),
-                (h) => getReceiptCached(h),
-                10
-            );
-
-            for (const rr of receiptResults) {
-                if (rr.status !== 'fulfilled' || !rr.value || !rr.value.logs) continue;
-                for (const log of rr.value.logs) {
-                    const transfer = parseTransferLog(log);
-                    if (transfer) transfers.push(transfer);
-                }
-            }
-        }
+        const wanted = tokenTransfersPage * HISTORY.transferPageSize + HISTORY.transferPageSize;
+        const transfersWithMetadata = await getCachedView(
+            `transfers_${latestBlock}_${wanted}`,
+            async () => addTransferMetadata(await findRecentTransfers(latestBlock, wanted, HISTORY.transfersBlocks))
+        );
+        const subtitle = document.getElementById('tokenTransfersSubtitle');
+        if (subtitle) subtitle.textContent = `Latest ERC-20 transfers, searching up to ${HISTORY.transfersBlocks.toLocaleString()} blocks`;
 
         // Paginate
-        const start = (tokenTransfersPage - 1) * 20;
-        const pageTxs = transfers.slice(start, start + 20);
+        const start = (tokenTransfersPage - 1) * HISTORY.transferPageSize;
+        const pageTxs = transfersWithMetadata.slice(start, start + HISTORY.transferPageSize);
 
         tbody.innerHTML = pageTxs.map(t => `
             <tr>
@@ -1431,15 +1720,23 @@ async function loadTokenTransfers() {
                 <td>${t.blockNumber}</td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${t.from}')">${truncateHash(t.from)}</span></td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${t.to}')">${truncateHash(t.to)}</span></td>
-                <td>${formatTokenValue(t.value, t.contractAddress)}</td>
-                <td><span class="hash-link" onclick="navigateTo('address', '${t.contractAddress}')">${truncateHash(t.contractAddress)}</span></td>
+                <td>${formatTokenValue(t.value, t.token)}</td>
+                <td><span class="hash-link" onclick="navigateTo('address', '${t.contractAddress}')">${escapeHtml(t.token?.symbol || truncateHash(t.contractAddress))}</span><div class="table-token-name">${escapeHtml(t.token?.name || truncateHash(t.contractAddress))}</div></td>
             </tr>
         `).join('') || '<tr><td colspan="6" class="loading-cell">No token transfers found</td></tr>';
 
         // Simple pagination
-        const totalPages = Math.max(1, Math.ceil(transfers.length / 20));
+        // The scan stops once it has enough rows for the next page. Expose a
+        // next page when the current range was full, then continue scanning
+        // only as the visitor asks for more results.
+        const totalPages = Math.max(
+            tokenTransfersPage,
+            Math.ceil(transfersWithMetadata.length / HISTORY.transferPageSize),
+            transfersWithMetadata.length >= wanted ? tokenTransfersPage + 1 : 1
+        );
         renderSimplePagination('tokenTransfersPagination', tokenTransfersPage, totalPages, (p) => {
             tokenTransfersPage = p;
+            syncRouteState();
             loadTokenTransfers();
         });
 
@@ -1488,40 +1785,35 @@ async function loadValidators() {
 
     try {
         const latestBlock = await provider.getBlockNumber();
-        const minerCounts = {};
-        const minerLastBlock = {};
-        const blocksToScan = 200;
-
-        // Scan blocks
-        const blockNumbers = [];
-        for (let i = latestBlock; i >= Math.max(0, latestBlock - blocksToScan); i--) {
-            blockNumbers.push(i);
-        }
-
-        const blocks = await fetchBlocksBatch(blockNumbers, false);
-
-        for (const b of blocks) {
-            if (!b) continue;
-            if (b.miner) {
-                minerCounts[b.miner] = (minerCounts[b.miner] || 0) + 1;
-                if (!minerLastBlock[b.miner] || b.number > minerLastBlock[b.miner]) {
-                    minerLastBlock[b.miner] = b.number;
+        const snapshot = await getCachedView('validators_snapshot', async () => {
+            const minerCounts = {};
+            const minerLastBlock = {};
+            const blockNumbers = buildEvenlySpacedBlockNumbers(
+                latestBlock,
+                HISTORY.validatorsBlocks,
+                HISTORY.validatorSamples
+            );
+            const blocks = await fetchBlocksBatch(blockNumbers, false);
+            for (const block of blocks) {
+                if (!block?.miner) continue;
+                minerCounts[block.miner] = (minerCounts[block.miner] || 0) + 1;
+                if (!minerLastBlock[block.miner] || block.number > minerLastBlock[block.miner]) {
+                    minerLastBlock[block.miner] = block.number;
                 }
             }
-        }
+            const sorted = Object.entries(minerCounts).sort((a, b) => b[1] - a[1]);
+            return { sorted, minerLastBlock, totalBlocks: sorted.reduce((sum, [, count]) => sum + count, 0), blocksScanned: blocks.filter(Boolean).length };
+        });
+        const subtitle = document.getElementById('validatorsSubtitle');
+        if (subtitle) subtitle.textContent = `Representative ${snapshot.blocksScanned.toLocaleString()}-block sample across the latest ${HISTORY.validatorsBlocks.toLocaleString()} blocks`;
 
-        // Sort by blocks mined
-        const sorted = Object.entries(minerCounts)
-            .sort((a, b) => b[1] - a[1]);
-        const totalBlocks = sorted.reduce((s, [, c]) => s + c, 0);
-
-        tbody.innerHTML = sorted.map(([addr, count], i) => `
+        tbody.innerHTML = snapshot.sorted.map(([addr, count], i) => `
             <tr>
                 <td>${i + 1}</td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${addr}')">${truncateHash(addr)}</span></td>
                 <td>${count}</td>
-                <td>${((count / totalBlocks) * 100).toFixed(2)}%</td>
-                <td>${minerLastBlock[addr] ? '#' + minerLastBlock[addr] : '-'}</td>
+                <td>${((count / snapshot.totalBlocks) * 100).toFixed(2)}%</td>
+                <td>${snapshot.minerLastBlock[addr] ? '#' + snapshot.minerLastBlock[addr] : '-'}</td>
             </tr>
         `).join('') || '<tr><td colspan="5" class="loading-cell">No miner data found</td></tr>';
 
@@ -1536,7 +1828,7 @@ async function loadValidators() {
 // ========================================
 async function loadBlocks() {
     const tbody = document.getElementById('blocksTableBody');
-    tbody.innerHTML = '<tr><td colspan="6" class="loading-cell"><div class="skeleton-table-row"></div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="loading-cell"><div class="skeleton-table-row"></div></td></tr>';
 
     try {
         const latestBlock = await provider.getBlockNumber();
@@ -1553,8 +1845,7 @@ async function loadBlocks() {
                 <td><span class="hash-link" onclick="navigateTo('block-detail', ${b.number})">${b.number}</span></td>
                 <td>${getTimeAgo(b.timestamp)}</td>
                 <td>${b.transactions ? b.transactions.length : 0}</td>
-                <td>${b.gasUsed ? Number(b.gasUsed).toLocaleString() : '-'}</td>
-                <td>${b.gasLimit ? Number(b.gasLimit).toLocaleString() : '-'}</td>
+                <td>${formatGasUsage(b.gasUsed, b.gasLimit)}</td>
                 <td><span class="hash-link" onclick="navigateTo('address', '${b.miner}')">${truncateHash(b.miner)}</span></td>
             </tr>
         `).join('');
@@ -1563,7 +1854,7 @@ async function loadBlocks() {
         renderBlocksPagination(latestBlock);
     } catch (error) {
         console.error('Blocks error:', error);
-        tbody.innerHTML = '<tr><td colspan="6" class="loading-cell">Error loading blocks</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="loading-cell">Error loading blocks</td></tr>';
     }
 }
 
@@ -1583,7 +1874,12 @@ function renderBlocksPagination(latestBlock) {
     el.innerHTML = html;
 }
 
-function goToBlocksPage(p) { if (p < 1) return; blocksPage = p; loadBlocks(); }
+function goToBlocksPage(p) {
+    if (p < 1) return;
+    blocksPage = p;
+    syncRouteState();
+    loadBlocks();
+}
 
 // ========================================
 // Chart Timeframe Handlers
@@ -1601,12 +1897,30 @@ function initTimeframeHandlers() {
                 // Update timeframe
                 const blocks = parseInt(btn.dataset.blocks);
                 
-                // Reload chart data
-                loadChartForTimeframe(chartType, blocks);
+                chartTimeframes[chartType] = blocks;
+                const requestVersion = ++chartRequestVersions[chartType];
+                loadChartForTimeframe(chartType, blocks, requestVersion);
             });
         });
     });
-}async function loadChartForTimeframe(chartType, blocksToFetch) {
+}
+
+function buildChartBlockNumbers(latestBlock, blocksToFetch) {
+    const sampleCount = Math.min(blocksToFetch, MAX_CHART_SAMPLES);
+    if (sampleCount <= 1) return [latestBlock];
+    const maxOffset = blocksToFetch - 1;
+    const numbers = [];
+    let previous = null;
+    for (let index = 0; index < sampleCount; index++) {
+        const offset = Math.round((index * maxOffset) / (sampleCount - 1));
+        const number = Math.max(0, latestBlock - offset);
+        if (number !== previous) numbers.push(number);
+        previous = number;
+    }
+    return numbers;
+}
+
+async function loadChartForTimeframe(chartType, blocksToFetch, requestVersion = ++chartRequestVersions[chartType]) {
     const canvasIdMap = {
         blockTime: 'blockTimeChart',
         difficulty: 'difficultyChart',
@@ -1622,6 +1936,7 @@ function initTimeframeHandlers() {
         if (canvas && canvas.parentElement) {
             const parent = canvas.parentElement;
             parent.style.position = 'relative';
+            parent.querySelectorAll('.chart-loading-overlay').forEach(overlay => overlay.remove());
             loadingOverlay = document.createElement('div');
             loadingOverlay.className = 'chart-loading-overlay';
             loadingOverlay.innerHTML = '<div class="loading-text"><i class="fas fa-spinner fa-spin"></i> Loading...<div class="chart-progress-bar"><div class="chart-progress-fill" id="chartProgressFill"></div></div></div>';
@@ -1629,13 +1944,10 @@ function initTimeframeHandlers() {
         }
 
         const blockNumber = await provider.getBlockNumber();
-        const startBlock = Math.max(0, blockNumber - blocksToFetch);
-        
-        // Build array of block numbers to fetch
-        const blockNums = [];
-        for (let i = blockNumber; i > startBlock; i--) {
-            blockNums.push(i);
-        }
+        // A 600px-wide canvas cannot show thousands of independent points.
+        // Evenly sampling the range retains the trend while reducing 24-hour
+        // work from 6,171 headers to at most 480.
+        const blockNums = buildChartBlockNumbers(blockNumber, blocksToFetch);
         
         // Use JSON-RPC batch requests with progress callback
         const progressFill = document.getElementById('chartProgressFill');
@@ -1645,6 +1957,7 @@ function initTimeframeHandlers() {
             }
         });
         const blocks = blocksRaw.filter(b => b !== null);
+        if (chartTimeframes[chartType] !== blocksToFetch || chartRequestVersions[chartType] !== requestVersion) return;
         
         if (blocks.length === 0) {
             throw new Error('No blocks fetched');
@@ -1657,7 +1970,8 @@ function initTimeframeHandlers() {
                 for (let i = 0; i < blocks.length - 1; i++) {
                     blockTimeData.push({
                         block: blocks[i].number,
-                        value: blocks[i].timestamp - blocks[i + 1].timestamp
+                        value: (blocks[i].timestamp - blocks[i + 1].timestamp) /
+                            Math.max(1, blocks[i].number - blocks[i + 1].number)
                     });
                 }
                 blockTimeData.reverse();
@@ -1679,7 +1993,7 @@ function initTimeframeHandlers() {
                 for (let i = 0; i < blocks.length; i++) {
                     const gu = blocks[i].gasUsed;
                     const gl = blocks[i].gasLimit;
-                    if (gu && gl && Number(gl) > 0) {
+                    if (gu != null && gl != null && Number(gl) > 0) {
                         gasUsageData.push({
                             block: blocks[i].number,
                             value: (Number(gu) / Number(gl)) * 100
@@ -1745,10 +2059,10 @@ function initTimeframeHandlers() {
         updateChartBadges(chartType, blocks);
         
     } catch (error) {
-        console.error(`Error loading ${chartType} chart:`, error);
+        if (chartRequestVersions[chartType] === requestVersion) console.error(`Error loading ${chartType} chart:`, error);
     } finally {
         // Remove loading overlay
-        if (loadingOverlay && loadingOverlay.parentElement) {
+        if (loadingOverlay && loadingOverlay.parentElement && chartRequestVersions[chartType] === requestVersion) {
             loadingOverlay.parentElement.removeChild(loadingOverlay);
         }
     }
@@ -1761,7 +2075,7 @@ function updateChartBadges(chartType, blocks) {
                 let avgTime = 14;
                 if (blocks.length >= 2) {
                     const timeDiff = blocks[0].timestamp - blocks[blocks.length - 1].timestamp;
-                    avgTime = timeDiff / (blocks.length - 1);
+                    avgTime = timeDiff / Math.max(1, blocks[0].number - blocks[blocks.length - 1].number);
                 }
                 document.getElementById('chartAvgBadge').textContent = 'Avg: ' + avgTime.toFixed(1) + 's';
                 break;
@@ -1800,22 +2114,13 @@ async function loadTransactions() {
 
     try {
         const latestBlock = await provider.getBlockNumber();
-        const blockNums = [];
-        for (let i = latestBlock; i >= Math.max(0, latestBlock - 200); i--) blockNums.push(i);
-
-        const blocks = await fetchBlocksBatch(blockNums, true);
-        const allTxs = [];
-
-        for (const b of blocks) {
-            if (!b) continue;
-            if (b.transactions) {
-                for (const tx of b.transactions) {
-                    allTxs.push({ ...tx, blockTimestamp: b.timestamp });
-                }
-            }
-        }
-
-        allTxs.reverse();
+        const subtitle = document.getElementById('transactionsSubtitle');
+        if (subtitle) subtitle.textContent = `Latest transactions, searching up to ${HISTORY.transactionsBlocks.toLocaleString()} blocks`;
+        const wanted = txsPage * txsPerPage + txsPerPage;
+        const allTxs = await getCachedView(
+            `transactions_${latestBlock}_${wanted}`,
+            () => findRecentTransactions(latestBlock, wanted, HISTORY.transactionsBlocks)
+        );
         const start = (txsPage - 1) * txsPerPage;
         const pageTxs = allTxs.slice(start, start + txsPerPage);
 
@@ -1837,7 +2142,8 @@ async function loadTransactions() {
             const value = ethers.utils.formatEther(tx.value);
             let txFee = '-';
             if (tx.gasUsed && tx.gasPrice) {
-                txFee = parseFloat(ethers.utils.formatEther(tx.gasUsed.mul(tx.gasPrice))).toFixed(6) + ' GAPLO';
+                const fee = ethers.BigNumber.from(tx.gasUsed).mul(ethers.BigNumber.from(tx.gasPrice));
+                txFee = parseFloat(ethers.utils.formatEther(fee)).toFixed(6) + ' GAPLO';
             }
             return `
                 <tr>
@@ -1851,9 +2157,14 @@ async function loadTransactions() {
             `;
         }).join('') || '<tr><td colspan="6" class="loading-cell">No transactions in recent blocks</td></tr>';
 
-        const totalTxPages = Math.max(1, Math.ceil(allTxs.length / txsPerPage));
+        const totalTxPages = Math.max(
+            txsPage,
+            Math.ceil(allTxs.length / txsPerPage),
+            allTxs.length >= wanted ? txsPage + 1 : 1
+        );
         renderSimplePagination('transactionsPagination', txsPage, totalTxPages, (p) => {
             txsPage = p;
+            syncRouteState();
             loadTransactions();
         });
     } catch (error) {
@@ -1873,7 +2184,7 @@ async function loadBlockDetail(blockNumber) {
         const block = await getBlockWithTxsCached(blockNumber);
         if (!block) { content.innerHTML = '<div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Block not found</p></div>'; return; }
 
-        const gasPercent = block.gasUsed && block.gasLimit ? ((Number(block.gasUsed) / Number(block.gasLimit)) * 100).toFixed(2) : '-';
+        const gasPercent = block.gasUsed != null && block.gasLimit ? ((Number(block.gasUsed) / Number(block.gasLimit)) * 100).toFixed(2) : '-';
 
         let html = `
             <div class="detail-row"><div class="detail-label"><i class="fas fa-hashtag"></i> Block Number</div><div class="detail-value">${block.number}</div></div>
@@ -1881,7 +2192,7 @@ async function loadBlockDetail(blockNumber) {
             <div class="detail-row"><div class="detail-label"><i class="fas fa-link"></i> Hash</div><div class="detail-value">${block.hash} <button class="copy-btn" onclick="copyToClipboard('${block.hash}')"><i class="fas fa-copy"></i> Copy</button></div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-arrow-left"></i> Parent Hash</div><div class="detail-value"><span class="hash-link" onclick="navigateTo('block-detail', ${block.number - 1})">${block.parentHash}</span></div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-user"></i> Miner</div><div class="detail-value"><span class="hash-link" onclick="navigateTo('address', '${block.miner}')">${block.miner}</span> <button class="copy-btn" onclick="copyToClipboard('${block.miner}')"><i class="fas fa-copy"></i></button></div></div>
-            <div class="detail-row"><div class="detail-label"><i class="fas fa-gas-pump"></i> Gas Used</div><div class="detail-value">${block.gasUsed ? Number(block.gasUsed).toLocaleString() : '-'} (${gasPercent}%)</div></div>
+            <div class="detail-row"><div class="detail-label"><i class="fas fa-gas-pump"></i> Gas Used</div><div class="detail-value">${block.gasUsed != null ? Number(block.gasUsed).toLocaleString() : '-'} (${gasPercent}%)</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-fire"></i> Gas Limit</div><div class="detail-value">${block.gasLimit ? Number(block.gasLimit).toLocaleString() : '-'}</div></div>
             <div class="detail-row"><div class="detail-label"><i class="fas fa-file"></i> Transactions</div><div class="detail-value">${block.transactions ? block.transactions.length : 0}</div></div>
         `;
@@ -1972,10 +2283,12 @@ async function loadTxDetail(txHash) {
         if (receipt && receipt.logs) {
             const tokenTransfers = receipt.logs.filter(l => l.topics && l.topics[0] === TRANSFER_TOPIC);
             if (tokenTransfers.length > 0) {
+                const transferMetadata = await getTokenMetadataBatch(tokenTransfers.map(log => log.address));
                 html += `<div class="detail-row"><div class="detail-label"><i class="fas fa-coins"></i> Token Transfers</div><div class="detail-value"><div class="detail-txs">`;
                 for (const log of tokenTransfers) {
                     const t = parseTransferLog(log);
                     if (t) {
+                        const token = transferMetadata.get(t.contractAddress.toLowerCase());
                         html += `
                             <div class="token-transfer-item">
                                 <div class="token-item-icon" style="width:32px;height:32px;font-size:14px"><i class="fas fa-coins"></i></div>
@@ -1983,7 +2296,7 @@ async function loadTxDetail(txHash) {
                                     <div class="item-detail">
                                         <span class="hash-link" onclick="navigateTo('address', '${t.from}')">${truncateHash(t.from)}</span>
                                         → <span class="hash-link" onclick="navigateTo('address', '${t.to}')">${truncateHash(t.to)}</span>
-                                        | ${formatTokenValue(t.value, t.contractAddress)}
+                                        | ${formatTokenValue(t.value, token)} (${escapeHtml(token?.name || 'ERC-20 Token')})
                                     </div>
                                 </div>
                             </div>
@@ -2050,26 +2363,27 @@ async function loadAddressDetail(address) {
 
         content.innerHTML = html;
 
-        // Scan for transactions - go deep with batch RPC (up to 50k blocks!)
+        // Search until we have the visible history rather than assuming a
+        // wallet's transaction count says how far back its last activity is.
         const latestBlock = await provider.getBlockNumber();
-        const txs = [];
-        const TX_SCAN_DEPTH = Math.min(txCount + 100, 50000); // Scan up to 50k blocks!
-        const blockNums = [];
-        for (let i = latestBlock; i >= Math.max(0, latestBlock - TX_SCAN_DEPTH); i--) blockNums.push(i);
-
-        const blocks = await fetchBlocksBatch(blockNums, true);
-        for (const b of blocks) {
-            if (txs.length >= 50) break;
-            if (!b) continue;
-            if (b.transactions) {
-                for (const tx of b.transactions) {
-                    if (tx.from?.toLowerCase() === address.toLowerCase() || tx.to?.toLowerCase() === address.toLowerCase()) {
-                        txs.push({ ...tx, blockTimestamp: b.timestamp, blockNumber: b.number });
-                        if (txs.length >= 50) break;
-                    }
-                }
-            }
-        }
+        const addressLower = address.toLowerCase();
+        const historyKey = `address_txs_${addressLower}_${latestBlock}`;
+        const txsPromise = getCachedView(
+            historyKey,
+            () => findRecentTransactions(
+                latestBlock,
+                50,
+                HISTORY.transactionsBlocks,
+                tx => tx.from?.toLowerCase() === addressLower || tx.to?.toLowerCase() === addressLower
+            )
+        );
+        const logScanDepth = Math.min(Math.max(txCount + 100, 10_000), 50_000);
+        const logFromBlock = Math.max(0, latestBlock - logScanDepth);
+        const transferLogsPromise = getCachedView(
+            `address_logs_${addressLower}_${latestBlock}_${logScanDepth}`,
+            () => fetchLogsByAddress(address, logFromBlock, latestBlock)
+        );
+        const txs = await txsPromise;
 
         // Render transactions tab
         document.getElementById('addrTxCount').textContent = txs.length + (txs.length >= 50 ? '+' : '');
@@ -2112,10 +2426,8 @@ async function loadAddressDetail(address) {
         const tokensTab = document.getElementById('addrTabTokens');
         tokensTab.innerHTML = '<div style="padding:16px;color:var(--text-secondary)"><i class="fas fa-spinner fa-spin"></i> Scanning for tokens via eth_getLogs...</div>';
         
-        // Use eth_getLogs to scan much deeper for ERC-20 transfers
-        const LOG_SCAN_DEPTH = Math.min(txCount + 100, 50000); // Up to 50k blocks!
-        const logFromBlock = Math.max(0, latestBlock - LOG_SCAN_DEPTH);
-        const transferLogs = await fetchLogsByAddress(address, logFromBlock, latestBlock);
+        // The log request has been running alongside transaction discovery.
+        const transferLogs = await transferLogsPromise;
         
         // Collect unique token contracts from Transfer events
         const tokenContracts = new Map();
@@ -2133,20 +2445,21 @@ async function loadAddressDetail(address) {
         // Batch fetch balances and names for discovered tokens (2 single HTTP requests)
         const tokenEntries = Array.from(tokenContracts.entries()).slice(0, 10);
         const tokenAddrs = tokenEntries.map(([_, addr]) => addr);
-        const [tokenBals, tokenNames] = await Promise.all([
+        const [tokenBals, tokenMetadata] = await Promise.all([
             getTokenBalancesBatch(tokenAddrs, address),
-            getTokenNamesBatch(tokenAddrs)
+            getTokenMetadataBatch(tokenAddrs)
         ]);
         const discoveredTokens = [];
         for (let i = 0; i < tokenAddrs.length; i++) {
             const contractOrig = tokenAddrs[i];
             const bal = tokenBals[i];
-            const resolvedName = tokenNames[i];
+            const resolvedMetadata = tokenMetadata.get(contractOrig.toLowerCase());
             if (bal && bal.gt(0)) {
                 discoveredTokens.push({
                     address: contractOrig,
                     balance: bal,
-                    name: resolvedName || ('Token ' + contractOrig.slice(0, 6) + '...' + contractOrig.slice(-4))
+                    token: resolvedMetadata,
+                    name: resolvedMetadata?.name || ('Token ' + contractOrig.slice(0, 6) + '...' + contractOrig.slice(-4))
                 });
             }
         }
@@ -2194,8 +2507,8 @@ async function loadAddressDetail(address) {
                     <div class="token-holding-address">${t.address}</div>
                 </div>
                 <div class="token-holding-balance">
-                    <div class="token-holding-amount">${parseFloat(ethers.utils.formatUnits(t.balance, 18)).toFixed(6)}</div>
-                    <div class="token-holding-usd">ERC-20 Token</div>
+                    <div class="token-holding-amount">${formatTokenValue(t.balance, t.token)}</div>
+                    <div class="token-holding-usd">${escapeHtml(t.token?.symbol || 'ERC-20 Token')}</div>
                 </div>
             </div>`;
         }
@@ -2329,6 +2642,7 @@ function formatHashrate(difficulty, blockTime) {
 // Init
 // ========================================
 document.addEventListener('DOMContentLoaded', init);
+window.addEventListener('pagehide', persistCaches);
 
 // Debounce helper
 function debounce(fn, ms) {
@@ -2341,8 +2655,40 @@ function debounce(fn, ms) {
 
 // Resize chart on window resize
 window.addEventListener('resize', debounce(() => {
-    if (blockTimeData.length > 0) renderAllCharts();
+    if (currentPage === 'dashboard' && blockTimeData.length > 0) renderAllCharts();
 }, 250));
+
+function initSmoothWheelScroll() {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || 'ontouchstart' in window) return;
+    let targetY = window.scrollY;
+    let currentY = window.scrollY;
+    let animationFrame = null;
+
+    const maxScrollY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const animate = () => {
+        currentY += (targetY - currentY) * 0.14;
+        if (Math.abs(targetY - currentY) < 0.5) {
+            window.scrollTo(0, targetY);
+            animationFrame = null;
+            return;
+        }
+        window.scrollTo(0, currentY);
+        animationFrame = requestAnimationFrame(animate);
+    };
+
+    window.addEventListener('wheel', event => {
+        if (event.ctrlKey || event.target.closest('.card-body, .table-container, .detail-value')) return;
+        event.preventDefault();
+        targetY = Math.max(0, Math.min(maxScrollY(), targetY + event.deltaY * 0.9));
+        if (!animationFrame) animationFrame = requestAnimationFrame(animate);
+    }, { passive: false });
+
+    window.addEventListener('scroll', () => {
+        if (!animationFrame) targetY = currentY = window.scrollY;
+    }, { passive: true });
+}
+
+initSmoothWheelScroll();
 
 // Clear stale caches on tab visibility change
 let lastHiddenTime = 0;
