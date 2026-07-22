@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AploCoin Block Explorer</title>
+    <title>AploCoin Explorer — Test UI</title>
     <meta name="description" content="AploCoin Blockchain Explorer - Search blocks, transactions, addresses, and token transfers on the AploCoin network.">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="styles.css">
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔷</text></svg>">
 </head>
-<body>
+<body class="mikhail-explorer">
     <!-- Live Update Toast -->
     <div class="live-toast" id="liveToast">
         <i class="fas fa-bolt"></i>
@@ -56,7 +56,7 @@
                     <span class="status-dot"></span>
                     <span class="status-text">Connecting...</span>
                 </div>
-                <button class="mobile-menu-btn" onclick="toggleMobileMenu()">
+                <button class="mobile-menu-btn" onclick="toggleMobileMenu()" aria-label="Toggle navigation menu" aria-controls="mainNav">
                     <i class="fas fa-bars"></i>
                 </button>
             </div>
@@ -84,7 +84,7 @@
                 <div class="hero-stat-divider"></div>
                 <div class="hero-stat">
                     <span class="hero-stat-value" id="heroTxs">-</span>
-                    <span class="hero-stat-label">Total Transactions</span>
+                    <span class="hero-stat-label">Recent Transactions</span>
                 </div>
                 <div class="hero-stat-divider"></div>
                 <div class="hero-stat">
@@ -303,13 +303,12 @@
                             <th>Block</th>
                             <th>Age</th>
                             <th>Txn</th>
-                            <th>Gas Used</th>
-                            <th>Gas Limit</th>
+                            <th>Gas Used / Capacity</th>
                             <th>Miner</th>
                         </tr>
                     </thead>
                     <tbody id="blocksTableBody">
-                        <tr><td colspan="6" class="loading-cell"><div class="skeleton-table-row"></div></td></tr>
+                        <tr><td colspan="5" class="loading-cell"><div class="skeleton-table-row"></div></td></tr>
                     </tbody>
                 </table>
             </div>
@@ -320,7 +319,7 @@
         <div class="page" id="page-transactions">
             <div class="page-header">
                 <h2><i class="fas fa-exchange-alt"></i> Transactions</h2>
-                <span class="page-subtitle">Showing recent transactions</span>
+                <span class="page-subtitle" id="transactionsSubtitle">Showing recent transactions</span>
             </div>
             <div class="table-container">
                 <table class="data-table">
@@ -346,7 +345,7 @@
         <div class="page" id="page-token-transfers">
             <div class="page-header">
                 <h2><i class="fas fa-coins"></i> Token Transfers</h2>
-                <span class="page-subtitle">ERC-20 Transfer events detected on-chain</span>
+                <span class="page-subtitle" id="tokenTransfersSubtitle">ERC-20 Transfer events detected on-chain</span>
             </div>
             <div class="table-container">
                 <table class="data-table">
@@ -372,7 +371,7 @@
         <div class="page" id="page-validators">
             <div class="page-header">
                 <h2><i class="fas fa-shield-alt"></i> Miners / Validators</h2>
-                <span class="page-subtitle">Top miners by blocks produced</span>
+                <span class="page-subtitle" id="validatorsSubtitle">Representative validator sample</span>
             </div>
             <div class="table-container">
                 <table class="data-table">
@@ -380,7 +379,7 @@
                         <tr>
                             <th>#</th>
                             <th>Address</th>
-                            <th>Blocks Mined</th>
+                            <th>Sampled Blocks</th>
                             <th>Percentage</th>
                             <th>Last Block</th>
                         </tr>
